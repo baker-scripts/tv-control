@@ -1,0 +1,1 @@
+{"name":"TV remote","short_name":"TV remote","start_url":"/","scope":"/","display":"standalone","background_color":"#111b18","theme_color":"#176750","icons":[{"src":"{{ICON192}}","sizes":"192x192","type":"image/png"},{"src":"{{ICON512}}","sizes":"512x512","type":"image/png","purpose":"any maskable"}]}

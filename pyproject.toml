@@ -1,0 +1,46 @@
+[project]
+name = "tv-control"
+version = "0.0.0"
+requires-python = ">=3.13"
+dependencies = [
+    "aiowebostv==0.10.0",
+    "mcp==2.3.0",
+    "uvicorn",
+    "starlette",
+    "pillow",
+    "apkutils==4.0.0",
+    "androidtvremote2>=0.3.2",
+]
+
+[dependency-groups]
+dev = [
+    "mypy>=2.4.1",
+    "playwright>=1.64.1",
+    "pytest>=9.2.0",
+    "pytest-cov>=7.1.0",
+    "ruff==0.15.4",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+addopts = "-m 'not e2e' --cov --cov-report=term-missing:skip-covered --cov-fail-under=80"
+markers = ["e2e: Playwright smoke test (needs chromium); run with -m e2e"]
+
+[tool.coverage.run]
+source = ["."]
+omit = ["tests/*", ".venv/*"]
+
+[tool.mypy]
+strict = true
+python_version = "3.13"
+exclude = ["^\\.venv/"]
+
+[[tool.mypy.overrides]]
+module = ["apkutils"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["test_lint", "test_panel", "test_tools", "test_static", "test_webos", "test_adbops", "test_scan_app", "test_e2e_smoke", "test_keys"]
+implicit_reexport = true
+warn_unused_ignores = false
+disable_error_code = ["arg-type", "union-attr", "no-any-return", "attr-defined"]

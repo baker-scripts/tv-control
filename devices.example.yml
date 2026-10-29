@@ -1,0 +1,82 @@
+# tv-control device inventory (example). Mount the real file read-only and point DEVICES_FILE at it.
+# ip is the primary ADB/webOS address; tailnet_fqdn is tried when ip fails.
+# status: pending marks a device with no reachable address yet; health and the panel skip it.
+# capabilities gates verbs: find_remote, wake, power, inputs, sleep_timer.
+# tv_control: best-effort marks a device whose TV has no confirmed HDMI-CEC.
+# paired_tv names the TV a Shield feeds; health reports it as standby unless the Shield plays.
+# input_ids (Fire TV only): input key -> Android TvInputInfo id, read from `dumpsys tv_input`.
+#   set_input refuses an input with no id. The switch is a passthrough intent and does not wake the TV.
+devices:
+  - name: living-room-shield
+    label: Living Room Shield
+    site: home
+    ip: 192.0.2.20
+    tailnet_fqdn: living-room-shield.example.ts.net
+    port: 5555
+    type: shield
+    paired_tv: living-room-tv
+    capabilities: [find_remote, power, sleep_timer]
+  - name: living-room-tv
+    site: home
+    ip: 192.0.2.21
+    type: webos
+    mac: "00:00:5e:00:53:01"
+    capabilities: [wake, power, inputs, sleep_timer]
+    inputs:
+      HDMI_1: Shield
+      HDMI_2: Console
+  - name: cabin-firetv
+    site: cabin
+    ip: 198.51.100.40
+    port: 5555
+    type: firestick
+    tv_control: best-effort
+    capabilities: [sleep_timer]
+  - name: cabin-tv
+    label: Cabin TV
+    site: cabin
+    ip: 198.51.100.41
+    port: 5555
+    type: firetv
+    capabilities: [inputs, sleep_timer]
+    inputs:
+      hdmi1: Shield
+    input_ids:
+      hdmi1: com.example.tvinput/.HdmiInputService/HW2
+  - name: guest-room-shield
+    site: cabin
+    status: pending
+    type: shield
+    capabilities: [find_remote]
+
+# Substrings matched against package names and titles; tv-control refuses to launch a match
+# and the panel hides it. netflix is only an example entry.
+denied_apps:
+  - netflix
+
+# Quick-launch buttons on each card. id: package or webOS app ids; title: fallback title match.
+quick_apps:
+  - label: Plex
+    id: [com.plexapp.android]
+    title: [plex]
+  - label: SmartTube
+    id: [org.smarttube.stable]
+
+# type_profiles: per-type baseline for the optional SCRIPTS_DIR scripts (tv-control itself ignores it).
+# debloat_lists: named package lists; cec_on: Settings.Global keys set to 1; keep_apps: never disabled.
+type_profiles:
+  shield:
+    cec_on: [hdmi_control_auto_wakeup_enabled, hdmi_control_auto_device_off_enabled]
+    keep_apps: [com.plexapp.android]
+  firetv:
+    cec_on: [hdmi_control_auto_wakeup_enabled, hdmi_control_auto_device_off_enabled]
+    keep_apps: [com.plexapp.android]
+
+# cidr: private LAN that scan_site probes (ADB 5555, webOS 3000/3001); empty means no routed LAN.
+# wol_relay: user@host on that LAN that sends Wake-on-LAN for the site's webOS TVs over SSH.
+sites:
+  home:
+    cidr: 192.0.2.0/24
+    wol_relay: user@relay.example.com
+  cabin:
+    cidr: 198.51.100.0/24
