@@ -90,3 +90,16 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+  release:
+    name: Release
+    needs: [test, image]
+    if: >-
+      github.event_name == 'push' && !cancelled() &&
+      needs.test.result == 'success' &&
+      needs.image.result == 'success'
+    permissions:
+      contents: write
+    uses: bakerboy448/.github/.github/workflows/release-calver.yml@625cd5467e2b71e44d10f06697535abca356f842
+    with:
+      sha: ${{ github.sha }}
