@@ -1,2 +1,2 @@
 self-hosted-runner:
-  labels: []
+  labels: [hetzner]

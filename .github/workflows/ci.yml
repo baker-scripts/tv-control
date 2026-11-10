@@ -17,7 +17,7 @@ concurrency:
 jobs:
   test:
     name: Lint and test
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, hetzner]
     timeout-minutes: 15
     steps:
       - name: Checkout
@@ -46,14 +46,14 @@ jobs:
 
       - name: Playwright smoke (375 px and 1280 px)
         run: |
-          uv run --locked playwright install --with-deps chromium
+          uv run --locked playwright install chromium
           uv run --locked pytest -q -m e2e --no-cov
 
   image:
     name: Build and push to GHCR
     needs: test
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, hetzner]
     timeout-minutes: 20
     permissions:
       contents: read
