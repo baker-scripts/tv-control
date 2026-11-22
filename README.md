@@ -14,6 +14,9 @@ A web panel and MCP server for a small fleet of TVs: NVIDIA Shields and Fire TVs
 - Site LAN scan for new ADB or webOS devices, with an admin approve step.
 - MCP server (streamable HTTP) with the same verbs, for an AI agent or a script. `python3 /app/app.py call <verb> key=value` calls it from inside the container.
 - An app denylist: `denied_apps` entries are never launched, by the panel or by MCP.
+- On-screen messages under a policy in `devices.yml` (`messages:`): who may send, when, how long, and a per-TV history. Android messages go through [TvOverlay](https://github.com/gugutab/TvOverlay).
+- Screen state and guarded navigation on Android: `current_screen`, `what_is_on`, `open_app`, `go_home`, `play_title` (Plex deep link), `navigate`, and optional on-screen narration of each step.
+- A plain `POST /message` on the MCP port (bearer token) for a Home Assistant `rest_command` operator push.
 
 ## Security model
 
@@ -42,8 +45,14 @@ The panel is meant to sit behind a reverse proxy with forward auth (built and te
 | `DEVICES_FILE` | `/scripts/devices.yml` | Device inventory. |
 | `SCRIPTS_DIR` | `/scripts` | Optional `deploy-config.sh`, `firetv-settings.sh`, and `lockdown.sh` for the baseline and lockdown verbs. Not shipped here. |
 | `HOST_CONFIG_DIR` | `/config` | Host path of the `/config` volume, printed for CLI screenshots. |
+| `TV_CONTROL_URL` | `http://127.0.0.1:$MCP_PORT/mcp` | MCP endpoint for `app.py call`, so a CLI on another host can call a remote instance. |
+| `TV_CONTROL_COMMIT_URL` | this repo's `/commit/` URL | Prefix for the commit link in the panel footer. |
+| `TV_CONTROL_VERSION`, `TV_CONTROL_GIT_SHA`, `TV_CONTROL_GIT_DATE` | `unknown` | Panel footer. Set as build args by CI; `BUILD_DATE` is written at image build. |
+| `MESSAGE_LOG_DIR` | `/config/messages` | Per-TV message history, one JSON file per device. |
 | `REMOTE_DIR` | `/config/remote` | Android TV Remote v2 client certificates and pairing markers, one set per Shield. |
 | `APP_CACHE_FILE`, `SLEEP_TIMERS_FILE`, `UNDO_DIR`, `ENROLL_DIR`, `SCREENSHOT_DIR`, `WEBOS_KEYS_FILE`, `WOL_KEY_FILE` | under `/config` | State files. |
+
+Image build args: `TV_UID` and `TV_GID` (default `1000`) name the `tvcontrol` user. ssh (the WoL relay) refuses a uid with no passwd entry, so run the container as that uid, or rebuild with your own, or mount a passwd entry for it. `ANDROID_TOOLS` pins the adb version.
 
 tv-control runs `adb` against the server on `127.0.0.1:5037`. If another container shares that server, keep both on the same adb version, or each client restarts the server.
 
@@ -57,17 +66,62 @@ See [`devices.example.yml`](devices.example.yml). Keep the real file outside thi
 | `devices[].type` | `shield`, `firestick`, `firetv`, or `webos`. |
 | `devices[].site` | Site key; must exist under `sites`. Drives `tv-site-<site>` access. |
 | `devices[].ip`, `port` | Primary ADB (5555) or webOS address. |
-| `devices[].tailnet_fqdn` | Fallback address, tried when `ip` fails. |
+| `devices[].tailnet_ip`, `tailnet_fqdn` | Fallback addresses, tried in that order when `ip` fails. |
+| `devices[].household` | Groups TVs for the message policy: narration depth and which household an assistant reply may reach. |
+| `devices[].narration` | `every_step`, `start_end`, or `off`; overrides the household's narration depth. |
+| `devices[].overlay_port` | TvOverlay REST port on the device (default 5001). |
+| `devices[].volume_via` | Name of a webOS TV that takes this device's volume and mute keys. |
 | `devices[].capabilities` | Any of `find_remote`, `wake`, `power`, `inputs`, `sleep_timer`. |
 | `devices[].label`, `mac`, `tv_control`, `status` | Display name, WoL MAC, `best-effort` CEC, `pending` (skipped until it has an address). |
 | `devices[].inputs` | Input key to button label, for example `HDMI_1: Shield`. |
+| `devices[].input_keys` | Fire TV only: input key to an Android keyevent name, tried before `input_ids`. |
 | `devices[].input_ids` | Fire TV only: input key to the Android TvInputInfo id (from `adb shell dumpsys tv_input`). An input without an id is shown as unavailable. |
 | `devices[].paired_tv` | The device name of the TV a Shield feeds; drives the paired-TV health status. |
 | `denied_apps` | Substrings of package names or titles that are never launched. |
 | `quick_apps` | Quick-launch buttons: `label`, `id` list, optional `title` list. |
+| `messages` | On-screen message policy; required for `toast`, `narrate`, and `narrate=true`. See below. |
 | `sites.<site>.cidr` | Private LAN that the scan probes. |
 | `sites.<site>.wol_relay` | `user@host` that sends WoL for that site over SSH. |
 | `type_profiles.<type>` | Read only by the optional `SCRIPTS_DIR` scripts: `debloat_lists`, `cec_on` (Global settings set to 1), and `keep_apps` (never disabled). tv-control ignores it. |
+
+## On-screen message policy
+
+The `messages:` block in `devices.yml` is the only source; tv-control re-reads it on every call.
+
+| Key | Effect |
+| --- | --- |
+| `title`, `corner` | TvOverlay title and corner on every Android message. |
+| `duration` | `ceil(words * seconds_per_5_words / 5)` seconds, clamped to `floor_s`..`cap_s`. |
+| `quiet_hours` | Device-local `start` and `end` (HH:MM). An unrequested message inside the window, or to a sleeping TV, is dropped with `shown: false`. |
+| `unrequested_kinds` | The only kinds a sender may push without a request: `media_ready`, `reply_waiting`, `operator_push`. |
+| `narration.default`, `narration.households` | Narration depth: per device, then per household, then the default. |
+| `assistant.name`, `assistant.sender` | The narration intro reads "Hi, this is <name>. I will navigate now."; `sender` is the id the assistant passes to `toast`. |
+
+Senders: `sender=operator` reaches any TV. The assistant sender needs `household=<the TV's household>` and either `requested=true` or a named kind (never `operator_push`); otherwise `wrong_household` or `not_allowed`. `sender` is declared, not authenticated: the MCP bearer token is the trust boundary.
+
+An Android message is `shown: true` only after HTTP 200 from TvOverlay and a visible overlay window. `image` takes an `http(s)` URL or `mdi:<name>`. The panel lists the last 50 messages per TV (`GET /api/messages/<device>`).
+
+```text
+toast device=<tv> message="Your movie is ready." sender=assistant kind=media_ready household=<household>
+```
+
+```bash
+curl -sS -X POST "http://<TS_IP>:8012/message" -H "Authorization: Bearer $TV_CONTROL_MCP_TOKEN" \
+  -H "Content-Type: application/json" -d '{"device":"<tv>","message":"Dinner is ready."}'
+```
+
+## Screen state and navigation (Android)
+
+| Verb | Behavior |
+| --- | --- |
+| `current_screen` | Read-only: app and activity in front, focus window, wakefulness, media sessions, and the focused view. `focus=false` skips the `uiautomator` dump. |
+| `what_is_on` | Read-only: app in front, playback state, and the media-session title. |
+| `open_app`, `go_home` | Wake the device if needed, act, then confirm the app in front (`not_confirmed` otherwise). `go_home` opens Projectivy on a Shield and presses HOME on Fire OS. |
+| `play_title` | Plex deep link from a server `machine_id` and a `rating_key`, then wait for Plex's media session to play. tv-control holds no Plex token. |
+| `navigate` | Up to 10 keys; checks `expect_app` (and `expect_focus` before the first key) before every key and stops with `screen_mismatch`. |
+| `narrate` | Shows the intro, then each `|`-separated step, 6 s apart, at the device's narration depth. |
+
+The in-use refusal skips a Shield whose app in front was confirmed by `open_app` or `go_home` in the last 120 s while nothing plays, so a multi-step flow runs without `force`.
 
 ## Compose example
 
@@ -86,6 +140,7 @@ services:
       TV_PROXY_KEY: ${TV_PROXY_KEY}
       TV_CONTROL_MCP_TOKEN: ${TV_CONTROL_MCP_TOKEN}
       TV_PANEL_URL: https://tv.example.com
+      MESSAGE_LOG_DIR: /config/messages
       HOME: /config
     volumes:
       - ./devices.yml:/scripts/devices.yml:ro
@@ -114,7 +169,13 @@ uv run --locked playwright install chromium
 uv run --locked pytest -m e2e --no-cov   # Playwright smoke at 375 px and 1280 px
 ```
 
-Tests need `yq` (mikefarah/yq) on `PATH`. Set `DEVICES_FILE` to lint your own inventory with `tests/test_lint.py`.
+Tests need `yq` (mikefarah/yq) on `PATH`. They read `devices.example.yml`; set `DEVICES_FILE` to lint your own inventory with `tests/test_lint.py`.
+
+`tests/test_leaks.py` fails on any RFC 1918 or Tailscale CGNAT (100.64/10) address, a `*.internal` host name, a `tail<hex>.ts.net` name, or a deploy-specific path in a tracked file. Keep site values in `devices.yml` and env; examples use 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24, and example.com.
+
+## Releases
+
+A push to `main` that passes CI gets a calver tag (`yyyy.mm.dd`), then an image `ghcr.io/baker-scripts/tv-control:<tag>` built with the version, commit SHA, and commit date. The `bump-deploy-repo` job opens a digest-pin PR in a deploy repo; it runs only when the repo variable `DOCKERGIT_BUMP_ENABLED` is `true` and `DOCKERGIT_BUMP_REPO`, `DOCKERGIT_BUMP_BASE`, `DOCKERGIT_BUMP_FILE`, and the secret `DOCKERGIT_BUMP_TOKEN` are set.
 
 ## License
 

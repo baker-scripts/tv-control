@@ -6,6 +6,8 @@ One uvicorn process serves two ports, each on 127.0.0.1 and TS_IP:
 
 `python3 /app/app.py call <tool> key=value ...` calls a tool through the local MCP port with the
 container's own token, so the /tv:* slash commands share the server's per-device locks.
+From another tailnet host, set TV_CONTROL_URL=http://<server TS_IP>:8012/mcp and
+TV_CONTROL_MCP_TOKEN, then run the same command with `uv run`.
 """
 
 import asyncio
@@ -101,6 +103,29 @@ def bearer_guard(app: Any) -> Any:
     return guarded
 
 
+async def message_endpoint(request: Request) -> JSONResponse:
+    """POST /message on the MCP port: one plain bearer call for a Home Assistant rest_command (operator push)."""
+    try:
+        data = await request.json()
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        data = None
+    device = str(data.get("device", "")) if isinstance(data, dict) else ""
+    text = str(data.get("message", "")) if isinstance(data, dict) else ""
+    if not (device and text and isinstance(data, dict)):
+        return JSONResponse({"error": "send JSON with device and message"}, 400)
+    return JSONResponse(
+        await tools.do_toast(
+            device,
+            text,
+            sender="operator",
+            requested=False,
+            kind="operator_push",
+            image=str(data.get("image", "")),
+            actor="home-assistant",
+        )
+    )
+
+
 async def timer_loop() -> None:
     while True:
         try:
@@ -118,6 +143,16 @@ def build_app() -> Any:
             transport_security=TransportSecuritySettings(allowed_hosts=hosts)
         )
     )
+
+    rest_app = bearer_guard(
+        Starlette(routes=[Route("/message", message_endpoint, methods=["POST"])])
+    )
+
+    async def mcp_port(scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope["type"] == "http" and scope.get("path") == "/message":
+            await rest_app(scope, receive, send)
+            return
+        await mcp_app(scope, receive, send)
 
     @contextlib.asynccontextmanager
     async def lifespan(_: Starlette) -> AsyncIterator[None]:
@@ -140,7 +175,7 @@ def build_app() -> Any:
             scope["type"] != "lifespan"
             and (scope.get("server") or (None, None))[1] == MCP_PORT
         ):
-            await mcp_app(scope, receive, send)
+            await mcp_port(scope, receive, send)
             return
         await web(scope, receive, send)
 
@@ -196,9 +231,9 @@ async def call(tool: str, args: dict[str, str]) -> int:
     for name in ("httpx", "httpx2"):
         logging.getLogger(name).setLevel(logging.WARNING)
     http = create_mcp_http_client(headers={"Authorization": f"Bearer {MCP_TOKEN}"})
-    transport = streamable_http_client(
-        f"http://127.0.0.1:{MCP_PORT}/mcp", http_client=http
-    )
+    # TV_CONTROL_URL lets another host call a remote instance over HTTP instead of ssh.
+    url = os.environ.get("TV_CONTROL_URL") or f"http://127.0.0.1:{MCP_PORT}/mcp"
+    transport = streamable_http_client(url, http_client=http)
     async with http, Client(transport, read_timeout_seconds=CLI_TIMEOUT_S) as client:
         result = await client.call_tool(tool, args)
     if result.structured_content is not None:

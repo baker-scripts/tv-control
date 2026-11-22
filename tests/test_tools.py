@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+from pathlib import Path
 from typing import Any
 
 import adbops
@@ -26,7 +27,7 @@ LG = {
     "type": "webos",
     "ip": "192.0.2.2",
     "site": "home",
-    "mac": "00:00:5e:00:53:01",
+    "mac": "aa:bb:cc:dd:ee:ff",
     "capabilities": ["wake", "power", "inputs", "sleep_timer"],
 }
 
@@ -122,7 +123,7 @@ def test_pending_device_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(inventory, "load_devices", load)
     with pytest.raises(DeviceError, match="pending"):
         run(inventory.get_device("p"))
-    assert not inventory.is_active({"ip": "192.0.2.4", "status": "pending"})
+    assert not inventory.is_active({"ip": "1.2.3.4", "status": "pending"})
 
 
 def test_adb_falls_back_to_tailnet_name(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -450,7 +451,7 @@ def test_wake_without_relay_key_is_actionable(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Any
 ) -> None:
     async def sites() -> dict[str, Any]:
-        return {"home": {"wol_relay": "relay@wol.example"}}
+        return {"home": {"wol_relay": "wol@relay"}}
 
     monkeypatch.setattr(webos, "load_sites", sites)
     monkeypatch.setattr(webos, "WOL_KEY", tmp_path / "missing")
@@ -467,7 +468,7 @@ def test_wake_sends_mac_through_relay(
     seen: list[tuple[str, ...]] = []
 
     async def sites() -> dict[str, Any]:
-        return {"home": {"wol_relay": "relay@wol.example"}}
+        return {"home": {"wol_relay": "wol@relay"}}
 
     async def fake_run(*argv: str, timeout: float = 0) -> tuple[int, bytes, str]:
         seen.append(argv)
@@ -477,16 +478,12 @@ def test_wake_sends_mac_through_relay(
     monkeypatch.setattr(webos, "WOL_KEY", key)
     monkeypatch.setattr(webos, "run", fake_run)
     assert run(webos.wake(LG))["wol_sent"] == LG["mac"]
-    assert seen[0][0] == "ssh" and seen[0][-3:] == (
-        "relay@wol.example",
-        "wol",
-        LG["mac"],
-    )
+    assert seen[0][0] == "ssh" and seen[0][-3:] == ("wol@relay", "wol", LG["mac"])
 
 
 def test_health_all_skips_pending(monkeypatch: pytest.MonkeyPatch) -> None:
     async def load() -> list[dict[str, Any]]:
-        return [SHIELD, {"name": "p", "ip": "192.0.2.5", "status": "pending"}]
+        return [SHIELD, {"name": "p", "ip": "1.1.1.1", "status": "pending"}]
 
     seen: list[str] = []
 
@@ -510,7 +507,12 @@ def test_panel_card_has_timer_presets_and_touch_layout() -> None:
     css = (panel.STATIC / "panel.css").read_text()
     assert "min-height:48px" in css and "viewport" in panel.PAGE
     assert "prefers-color-scheme:dark" in css
+    assert 'class="sheet"' in card and "text-count" in card
+    for phrase in ("youtube", "@gmail.com", ".com"):
+        assert f'data-chip="{phrase}"' in card
+    assert card.count("<svg") == 4 and 'aria-label="Up"' in card
     lg = panel._card({**LG, "ip": "192.0.2.2"})
+    assert 'class="sheet"' not in lg
     assert 'class="inputs row"' in lg and 'data-act="findremote"' not in lg
 
 
@@ -621,6 +623,16 @@ def test_paired_tv_unreachable_while_playing_is_fault(
     assert out["status"] == "fault: paired TV unreachable while Shield plays"
 
 
+@pytest.mark.parametrize("state", ["unreachable", "standby"])
+def test_webos_tv_not_connected_while_playing_is_fault(
+    monkeypatch: pytest.MonkeyPatch, state: str
+) -> None:
+    out = _paired_health(
+        monkeypatch, {"awake": True, "playing": True}, {"webos_state": state}
+    )
+    assert out["status"] == "fault: paired TV unreachable while Shield plays"
+
+
 @pytest.mark.parametrize(
     "shield", [{"awake": True, "playing": False}, {"awake": False, "playing": True}]
 )
@@ -692,6 +704,47 @@ def test_firetv_set_input_uses_passthrough_uri(monkeypatch: pytest.MonkeyPatch) 
     assert not calls
 
 
+def test_firetv_set_input_uses_input_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    from unittest.mock import AsyncMock
+
+    dev = {
+        "name": "fire",
+        "type": "firetv",
+        "inputs": {"hdmi1": "Shield"},
+        "input_keys": {"hdmi1": "TV_INPUT_HDMI_1"},
+    }
+    monkeypatch.setattr(tools, "get_device", AsyncMock(return_value=dev))
+    calls: list[tuple[Any, ...]] = []
+
+    async def fake_adb(serial: str, *args: str, **_: Any) -> Any:
+        calls.append(args)
+        return 0, b"", ""
+
+    async def awake(serial: str, cmd: str) -> str:
+        return "mWakefulness=Awake"
+
+    async def ready(d: dict[str, Any]) -> str:
+        return "ser"
+
+    monkeypatch.setattr(adbops, "adb", fake_adb)
+    monkeypatch.setattr(adbops, "read", awake)
+    monkeypatch.setattr(adbops, "require_device", ready)
+    body = run(tools.do_set_input("fire", "hdmi1"))
+    assert body["input_set"] == "TV_INPUT_HDMI_1"
+    assert body["via"] == "keyevent"
+    assert calls[0][-1] == "KEYCODE_TV_INPUT_HDMI_1"
+    with pytest.raises(DeviceError):
+        run(adbops.set_input_key(dev, "BACK; reboot"))
+
+    async def asleep(serial: str, cmd: str) -> str:
+        return "mWakefulness=Asleep"
+
+    monkeypatch.setattr(adbops, "read", asleep)
+    calls.clear()
+    assert "asleep" in run(tools.do_set_input("fire", "hdmi1"))["error"]
+    assert not calls
+
+
 def test_offline_apps_flagged(monkeypatch: pytest.MonkeyPatch) -> None:
     from unittest.mock import AsyncMock
 
@@ -711,3 +764,227 @@ def test_panel_js_shows_offline_message() -> None:
 
     js = (Path(__file__).resolve().parents[1] / "static" / "panel.js").read_text()
     assert js.count("Offline \\u2013 apps unavailable") == 2
+
+
+def _route_volume(monkeypatch: pytest.MonkeyPatch, tv: dict[str, Any]) -> list[str]:
+    shield = {**SHIELD, "volume_via": "lg-a"}
+    devices = {"shield-a": shield, "lg-a": tv}
+    sent: list[str] = []
+
+    async def get(name: str) -> dict[str, Any]:
+        return devices[name]
+
+    async def press(dev: dict[str, Any], key: str) -> dict[str, Any]:
+        sent.append(f"{dev['name']}:{key}")
+        return {"sent": key, "volume": 41, "muted": False}
+
+    async def no_remote(*_: Any) -> Any:
+        raise AssertionError("volume must not use the Shield remote or ADB")
+
+    monkeypatch.setattr(tools, "get_device", get)
+    monkeypatch.setattr(webos, "send_key", press)
+    monkeypatch.setattr(tools.tvremote, "send_key", no_remote)
+    return sent
+
+
+@pytest.mark.parametrize("key", ["VOLUME_UP", "VOLUME_DOWN", "VOLUME_MUTE"])
+def test_shield_volume_keys_drive_the_linked_tv(
+    monkeypatch: pytest.MonkeyPatch, key: str
+) -> None:
+    sent = _route_volume(monkeypatch, LG)
+    body = run(tools.do_key("shield-a", key))
+    assert sent == [f"lg-a:{key}"]
+    assert body["volume"] == 41 and body["via"] == "webos:lg-a"
+    assert body["device"] == "shield-a"
+
+
+def test_volume_via_must_be_webos(monkeypatch: pytest.MonkeyPatch) -> None:
+    _route_volume(monkeypatch, SHIELD)
+    assert "not a webOS TV" in run(tools.do_key("shield-a", "VOLUME_UP"))["error"]
+
+
+def test_quick_phrases_pass_the_text_filter_and_js_matches_it() -> None:
+    from pathlib import Path
+
+    import adbops
+    import panel
+
+    assert all(adbops.TEXT_SAFE_RE.fullmatch(p) for p in panel.QUICK_PHRASES)
+    js = (Path(__file__).resolve().parents[1] / "static" / "panel.js").read_text()
+    assert r"/^[A-Za-z0-9 .,_@+=\/:-]{1,200}$/" in js
+    assert adbops.TEXT_SAFE_RE.pattern == "[A-Za-z0-9 .,_@+=/:-]{1,200}"
+
+
+def test_shield_home_opens_projectivy(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake(dev: dict[str, Any], pkg: str) -> dict[str, Any]:
+        return {"launched": pkg}
+
+    monkeypatch.setattr(adbops, "launch", fake)
+    assert run(tools.do_key("shield-a", "HOME"))["launched"] == tools.SHIELD_HOME_APP
+
+
+def test_shield_wake_sends_wakeup(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake(dev: dict[str, Any], key: str) -> dict[str, Any]:
+        return {"sent": key}
+
+    monkeypatch.setattr(adbops, "send_key", fake)
+    assert run(tools.do_wake("shield-a"))["sent"] == "WAKEUP"
+
+
+def test_app_refresh_does_not_block_launch(monkeypatch: pytest.MonkeyPatch) -> None:
+    release = asyncio.Event()
+
+    async def slow_lists(dev: dict[str, Any]) -> dict[str, Any]:
+        await release.wait()
+        return {"apps": []}
+
+    async def fake_launch(dev: dict[str, Any], pkg: str) -> dict[str, Any]:
+        return {"launched": pkg}
+
+    monkeypatch.setattr(tools, "_live_lists", slow_lists)
+    monkeypatch.setattr(adbops, "launch", fake_launch)
+
+    async def scenario() -> dict[str, Any]:
+        refresh = asyncio.create_task(tools.refresh_lists("shield-a"))
+        await asyncio.sleep(0)
+        launched = await asyncio.wait_for(
+            tools.do_launch("shield-a", "com.plexapp.android"), 1
+        )
+        release.set()
+        await refresh
+        return launched
+
+    assert run(scenario())["launched"] == "com.plexapp.android"
+
+
+def _device_reads(monkeypatch: pytest.MonkeyPatch, focus: str, state: str) -> None:
+    async def fake_require(dev: dict[str, Any]) -> str:
+        return "s"
+
+    async def fake_read(serial: str, command: str) -> str:
+        if "mWakefulness" in command:
+            return "mWakefulness=Awake"
+        if "media_session" in command:
+            return f"PlaybackState {{state={state},"
+        return focus
+
+    monkeypatch.setattr(adbops, "require_device", fake_require)
+    monkeypatch.setattr(adbops, "read", fake_read)
+
+
+def test_agent_command_refused_while_playing(monkeypatch: pytest.MonkeyPatch) -> None:
+    _device_reads(monkeypatch, tools.SHIELD_HOME_APP, "3")
+    assert "in_use" in run(tools.in_use_refusal("shield-a", False))["error"]
+    assert run(tools.in_use_refusal("shield-a", True)) is None
+
+
+def test_agent_command_refused_in_paused_app(monkeypatch: pytest.MonkeyPatch) -> None:
+    _device_reads(monkeypatch, "org.smarttube.stable/Browse", "2")
+    assert "in_use" in run(tools.in_use_refusal("shield-a", False))["error"]
+
+
+def test_agent_command_allowed_on_idle_launcher(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _device_reads(monkeypatch, tools.SHIELD_HOME_APP, "1")
+    assert run(tools.in_use_refusal("shield-a", False)) is None
+
+
+PLEX_FOCUS = "mCurrentFocus=Window{1 u0 com.plexapp.android/com.plexapp.Main}"
+
+
+def test_app_tv_control_just_opened_is_not_in_use(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(tools, "_opened", {})
+    _device_reads(monkeypatch, PLEX_FOCUS, "2")
+    assert "in_use" in run(tools.in_use_refusal("shield-a", False))["error"]
+    tools.note_opened("shield-a", "com.plexapp.android")
+    assert run(tools.in_use_refusal("shield-a", False)) is None
+
+
+def test_opened_grace_never_covers_playback_another_app_or_expiry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(tools, "_opened", {})
+    tools.note_opened("shield-a", "com.plexapp.android")
+    _device_reads(monkeypatch, PLEX_FOCUS, "3")
+    assert "in_use" in run(tools.in_use_refusal("shield-a", False))["error"]
+    _device_reads(monkeypatch, "org.smarttube.stable/Browse", "2")
+    assert "in_use" in run(tools.in_use_refusal("shield-a", False))["error"]
+    _device_reads(monkeypatch, PLEX_FOCUS, "2")
+    monkeypatch.setattr(tools, "OPENED_GRACE_S", 0)
+    assert "in_use" in run(tools.in_use_refusal("shield-a", False))["error"]
+
+
+@pytest.mark.parametrize(
+    ("name", "call"),
+    [
+        ("set_input", lambda: tools.set_input("shield-a", "hdmi1")),
+        ("sleep_timer", lambda: tools.sleep_timer("shield-a", 15)),
+        ("reboot", lambda: tools.reboot("shield-a")),
+    ],
+)
+def test_set_input_sleep_timer_reboot_refused_while_playing(
+    monkeypatch: pytest.MonkeyPatch, name: str, call: Any
+) -> None:
+    _device_reads(monkeypatch, tools.SHIELD_HOME_APP, "3")
+    hit: list[str] = []
+
+    async def spy(*a: Any, **k: Any) -> dict[str, Any]:
+        hit.append(name)
+        return {}
+
+    for fn in ("do_set_input", "do_sleep_timer", "do_reboot"):
+        monkeypatch.setattr(tools, fn, spy)
+    assert "in_use" in run(call())["error"]
+    assert hit == []
+
+
+def test_force_bypasses_guard_for_set_input(monkeypatch: pytest.MonkeyPatch) -> None:
+    _device_reads(monkeypatch, tools.SHIELD_HOME_APP, "3")
+
+    async def fake(device: str, input_id: str) -> dict[str, Any]:
+        return {"ok": True}
+
+    monkeypatch.setattr(tools, "do_set_input", fake)
+    assert run(tools.set_input("shield-a", "hdmi1", force=True)) == {"ok": True}
+
+
+def test_stock_launcher_launch_opens_projectivy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake(dev: dict[str, Any], pkg: str) -> dict[str, Any]:
+        return {"launched": pkg}
+
+    monkeypatch.setattr(adbops, "launch", fake)
+    body = run(tools.do_launch("shield-a", "com.google.android.tvlauncher"))
+    assert body["launched"] == tools.SHIELD_HOME_APP
+
+
+def test_panel_taps_press_non_repeat_keys_and_shield_on_wakes() -> None:
+    source = (Path(__file__).parent.parent / "static" / "panel.js").read_text()
+    assert "e.detail===0||!HOLD_KEYS.includes(b.dataset.key)" in source
+    assert "card.dataset.type==='shield'?'wake':'key'" in source
+
+
+OVERLAY_FOCUS = (
+    "mCurrentFocus=Window{1 u0 com.tabdeveloper.tvoverlay/"
+    "com.tabdeveloper.tvoverlay.DefaultActivity}"
+)
+
+
+def test_tvoverlay_screen_with_nothing_playing_is_not_in_use(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _device_reads(monkeypatch, OVERLAY_FOCUS, "1")
+    assert run(tools.in_use_refusal("shield-a", False)) is None
+    _device_reads(monkeypatch, OVERLAY_FOCUS, "2")
+    assert run(tools.in_use_refusal("shield-a", False)) is None
+
+
+def test_tvoverlay_screen_while_playing_is_still_in_use(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _device_reads(monkeypatch, OVERLAY_FOCUS, "3")
+    assert "in_use" in run(tools.in_use_refusal("shield-a", False))["error"]

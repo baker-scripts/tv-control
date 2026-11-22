@@ -51,7 +51,6 @@ def server() -> Iterator[str]:
     mp = pytest.MonkeyPatch()
     mp.setattr(panel, "PROXY_KEY", PROXY_KEY)
     mp.setattr(panel, "load_devices", AsyncMock(return_value=DEVICES))
-    mp.setattr(panel, "load_denied_apps", AsyncMock(return_value=["netflix"]))
     ok: Any = AsyncMock(return_value={"adb_state": "device", "foreground": "home"})
     for verb in (
         "do_status",
@@ -62,6 +61,22 @@ def server() -> Iterator[str]:
         "do_sleep_timer",
     ):
         mp.setattr(panel.tools, verb, ok)
+    now = {"app": "com.plexapp.android", "app_title": "Plex", "awake": True}
+    mp.setattr(
+        panel.tools,
+        "do_what_is_on",
+        AsyncMock(return_value={**now, "state": "playing", "title": "The Matrix"}),
+    )
+    mp.setattr(
+        panel.tools,
+        "in_use_refusal",
+        AsyncMock(return_value={"error": "in_use: someone may be watching"}),
+    )
+    mp.setattr(
+        panel.tools,
+        "do_go_home",
+        AsyncMock(return_value={"confirmed": True, "package": "home"}),
+    )
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
@@ -104,4 +119,22 @@ def test_panel_has_no_netflix_and_no_horizontal_overflow(
         "document.documentElement.scrollWidth - document.documentElement.clientWidth"
     )
     assert overflow <= 0, f"horizontal overflow of {overflow}px at {size[0]}px"
+    context.close()
+
+
+def test_now_on_in_use_notice_and_build_footer(server: str, browser: Browser) -> None:
+    context = browser.new_context(
+        viewport={"width": 375, "height": 812}, extra_http_headers=HEADERS
+    )
+    page = context.new_page()
+    page.goto(server + "/#device=shield-a")
+    card = page.locator('.device[data-dev="shield-a"]')
+    card.locator(".foreground", has_text="Plex · Playing · The Matrix").wait_for()
+    card.locator('[data-act="home"]').click()
+    notice = card.locator(".notice")
+    notice.wait_for(state="visible")
+    assert "Someone may be watching this TV." in notice.inner_text()
+    notice.locator(".anyway").click()
+    page.locator("#snackbar", has_text="The home screen is showing.").wait_for()
+    assert "built" in page.inner_text("#build")
     context.close()

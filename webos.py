@@ -19,7 +19,7 @@ WEBOS_TIMEOUT_S = 15
 WEBOS_PAIR_TIMEOUT_S = 60
 WOL_TIMEOUT_S = 20
 RETRY_DELAY_S = 1.0
-# WSMessageTypeError is a TypeError: the TV sent a close frame mid-handshake (transient).
+# WSMessageTypeError is a TypeError: the TV closes the handshake with 1008 while in standby.
 RETRYABLE = (TimeoutError, OSError, aiohttp.ClientError, aiohttp.WSMessageTypeError)
 MAC_RE = re.compile(r"^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$")
 TOAST_MAX_CHARS = 200
@@ -136,7 +136,8 @@ async def status(dev: dict[str, Any]) -> dict[str, Any]:
     try:
         return await call(dev, read)
     except DeviceError as exc:
-        return {"webos_state": "unreachable", "detail": str(exc)}
+        state = "standby" if "WSMessageTypeError" in str(exc) else "unreachable"
+        return {"webos_state": state, "detail": str(exc)}
 
 
 async def pair(dev: dict[str, Any]) -> dict[str, Any]:
@@ -198,6 +199,9 @@ async def wake(dev: dict[str, Any]) -> dict[str, Any]:
     return {"wol_sent": mac, "via": relay}
 
 
+VOLUME_KEYS = frozenset({"VOLUME_UP", "VOLUME_DOWN", "VOLUME_MUTE"})
+
+
 async def send_key(dev: dict[str, Any], key: str) -> dict[str, Any]:
     if key == "WAKEUP":
         return await wake(dev)
@@ -218,8 +222,16 @@ async def send_key(dev: dict[str, Any], key: str) -> dict[str, Any]:
         else:
             raise DeviceError(f"unsupported_on_device: {key} has no webOS mapping")
 
-    await call(dev, press)
-    return {"sent": key}
+    volume: dict[str, Any] = {}
+
+    async def press_and_read(tv: WebOsClient) -> None:
+        await press(tv)
+        if key in VOLUME_KEYS:
+            volume["volume"] = await tv.get_volume()
+            volume["muted"] = await tv.get_muted()
+
+    await call(dev, press_and_read)
+    return {"sent": key, **volume}
 
 
 async def list_apps(dev: dict[str, Any]) -> list[dict[str, str]]:
@@ -249,6 +261,26 @@ async def list_inputs(dev: dict[str, Any]) -> list[dict[str, str]]:
         }
         for i in inputs
     ]
+
+
+async def audio_settings(dev: dict[str, Any]) -> dict[str, Any]:
+    """Read-only: sound output (ssap com.webos.service.apiadapter/audio/getSoundOutput) and SimpLink.
+
+    SimpLink is category "other", key simplinkEnable, read through settings/getSystemSettings.
+    The ssap allowlist refuses simplinkAutoPowerOn and multi-key reads that include it.
+    """
+
+    async def read(tv: WebOsClient) -> dict[str, Any]:
+        res = await tv.request(
+            "settings/getSystemSettings",
+            {"category": "other", "keys": ["simplinkEnable"]},
+        )
+        return {
+            "sound_output": await tv.get_sound_output(),
+            "simplink": (res.get("settings") or {}).get("simplinkEnable"),
+        }
+
+    return await call(dev, read)
 
 
 async def set_input(dev: dict[str, Any], input_id: str) -> dict[str, Any]:

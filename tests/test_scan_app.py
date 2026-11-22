@@ -40,7 +40,7 @@ def test_yq_failure_raises(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> N
     [
         ({}, "no routed LAN"),
         ({"x": {"cidr": "8.8.8.0/24"}}, "private IPv4"),
-        ({"x": {"cidr": "10.0.0.0/8"}}, "private IPv4"),
+        ({"x": {"cidr": "198.18.0.0/15"}}, "private IPv4"),
     ],
 )
 def test_site_network_rejects(
@@ -53,9 +53,9 @@ def test_site_network_rejects(
 
 def test_site_network_accepts_private_24(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        scan, "load_sites", AsyncMock(return_value={"x": {"cidr": "198.51.100.0/24"}})
+        scan, "load_sites", AsyncMock(return_value={"x": {"cidr": "203.0.113.0/24"}})
     )
-    assert str(run(scan.site_network("x"))) == "198.51.100.0/24"
+    assert str(run(scan.site_network("x"))) == "203.0.113.0/24"
 
 
 def test_open_probe_sees_listener_and_closed_port() -> None:
@@ -72,34 +72,34 @@ def test_open_probe_sees_listener_and_closed_port() -> None:
 
 
 def test_scan_site_splits_known_and_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
-    net = ipaddress.ip_network("192.0.2.0/30")
+    net = ipaddress.ip_network("198.51.100.0/30")
     monkeypatch.setattr(scan, "site_network", AsyncMock(return_value=net))
     monkeypatch.setattr(
         scan,
         "load_devices",
-        AsyncMock(return_value=[{"name": "k", "ip": "192.0.2.1"}]),
+        AsyncMock(return_value=[{"name": "k", "ip": "198.51.100.1"}]),
     )
 
     async def fake_open(ip: str, port: int, _sem: asyncio.Semaphore) -> bool:
-        return port in (5555, 3001) and ip in ("192.0.2.1", "192.0.2.2")
+        return port in (5555, 3001) and ip in ("198.51.100.1", "198.51.100.2")
 
     monkeypatch.setattr(scan, "_open", fake_open)
     out = run(scan.scan_site("x"))
-    assert out["known_hits"] == ["192.0.2.1"]
+    assert out["known_hits"] == ["198.51.100.1"]
     assert [(u["ip"], u["guessed_type"]) for u in out["unknown"]] == [
-        ("192.0.2.2", "webos")
+        ("198.51.100.2", "webos")
     ]
 
 
 def stage(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, **over: Any) -> Any:
-    net = ipaddress.ip_network("192.0.2.0/24")
+    net = ipaddress.ip_network("198.51.100.0/24")
     monkeypatch.setattr(scan, "ENROLL_DIR", tmp_path)
     monkeypatch.setattr(scan, "site_network", AsyncMock(return_value=net))
     monkeypatch.setattr(scan, "load_devices", AsyncMock(return_value=[{"name": "old"}]))
     req = {
         "site": "x",
         "name": "new-tv",
-        "ip": "192.0.2.5",
+        "ip": "198.51.100.5",
         "port": 5555,
         "type": "shield",
         "config": "simple",
@@ -193,6 +193,35 @@ def test_bearer_guard(monkeypatch: pytest.MonkeyPatch) -> None:
     assert asgi([(b"authorization", b"Bearer s3cret")]) == (0, True)
 
 
+@pytest.mark.parametrize(
+    ("env", "want"),
+    [
+        (None, "http://127.0.0.1:8012/mcp"),
+        ("http://203.0.113.9:8012/mcp", "http://203.0.113.9:8012/mcp"),
+    ],
+)
+def test_cli_call_url_defaults_local_and_honors_tv_control_url(
+    monkeypatch: pytest.MonkeyPatch, env: str | None, want: str
+) -> None:
+    import mcp.client.streamable_http as transport
+
+    seen: list[str] = []
+
+    def fake_client(url: str, **_: Any) -> Any:
+        seen.append(url)
+        raise RuntimeError("stop")
+
+    monkeypatch.setattr(transport, "streamable_http_client", fake_client)
+    monkeypatch.setattr(app, "MCP_PORT", 8012)
+    if env is None:
+        monkeypatch.delenv("TV_CONTROL_URL", raising=False)
+    else:
+        monkeypatch.setenv("TV_CONTROL_URL", env)
+    with pytest.raises(RuntimeError, match="stop"):
+        run(app.call("what_is_on", {"device": "shield-a"}))
+    assert seen == [want]
+
+
 def test_by_port_routes_mcp_port_through_guard(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -217,6 +246,59 @@ def test_by_port_routes_mcp_port_through_guard(
     }
     run(web(scope, receive, send))
     assert seen == [503]
+
+
+def post_message(body: bytes, token: str | None) -> tuple[int, dict[str, Any] | None]:
+    web = app.build_app()
+    sent: list[dict[str, Any]] = []
+    chunks = [{"type": "http.request", "body": body, "more_body": False}]
+
+    async def receive() -> dict[str, Any]:
+        return chunks.pop(0) if chunks else {"type": "http.disconnect"}
+
+    async def send(message: dict[str, Any]) -> None:
+        sent.append(message)
+
+    headers = [(b"content-type", b"application/json")]
+    if token:
+        headers.append((b"authorization", f"Bearer {token}".encode()))
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/message",
+        "headers": headers,
+        "query_string": b"",
+        "server": ("127.0.0.1", app.MCP_PORT),
+    }
+    run(web(scope, receive, send))
+    status = sent[0]["status"]
+    payload = b"".join(m.get("body", b"") for m in sent[1:])
+    return status, json.loads(payload) if payload else None
+
+
+def test_message_endpoint_is_one_bearer_call_for_home_assistant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(app, "MCP_TOKEN", "secret")
+    toast = AsyncMock(return_value={"device": "tv", "shown": True})
+    monkeypatch.setattr(app.tools, "do_toast", toast)
+    assert post_message(b'{"device": "tv", "message": "Dinner."}', None)[0] == 401
+    toast.assert_not_called()
+    status, body = post_message(
+        b'{"device": "tv", "message": "Dinner.", "image": "mdi:food"}', "secret"
+    )
+    assert status == 200 and body == {"device": "tv", "shown": True}
+    toast.assert_awaited_once_with(
+        "tv",
+        "Dinner.",
+        sender="operator",
+        requested=False,
+        kind="operator_push",
+        image="mdi:food",
+        actor="home-assistant",
+    )
+    assert post_message(b'{"device": "tv"}', "secret")[0] == 400
+    assert post_message(b"[1]", "secret")[0] == 400
 
 
 def test_save_image_sanitises_name(
@@ -260,3 +342,9 @@ def test_main_serves_without_call(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "argv", ["app.py"])
     app.main()
     assert served == [True]
+
+
+def test_netflix_package_has_label_fallback() -> None:
+    from appcache import app_title
+
+    assert app_title("com.netflix.ninja") == "Netflix"
