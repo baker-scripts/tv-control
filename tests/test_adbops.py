@@ -85,8 +85,8 @@ def test_adb_ready_fire_reconnects_then_falls_back(
 BEDROOM = {
     "name": "bed-a",
     "type": "shield",
-    "ip": "192.0.2.32",
-    "tailnet_ip": "203.0.113.41",
+    "ip": "192.0.2.7",
+    "tailnet_ip": "203.0.113.8",
     "tailnet_fqdn": "bed-a.example.ts.net",
 }
 
@@ -97,19 +97,19 @@ def test_lan_down_falls_back_to_tailnet_ip_and_remembers_it(
     fake = install(
         monkeypatch,
         {
-            "192.0.2.32": (1, b"", "Host is unreachable"),
-            "-s 203.0.113.41:5555 get-state": ok("device\n"),
+            "192.0.2.7": (1, b"", "Host is unreachable"),
+            "-s 203.0.113.8:5555 get-state": ok("device\n"),
         },
     )
     monkeypatch.setattr(adbops, "_path_at", {})
-    assert go(adbops.adb_ready(BEDROOM)) == ("203.0.113.41:5555", "device")
-    assert adbops.serial_of(BEDROOM) == "203.0.113.41:5555"
-    assert adbops.candidates(BEDROOM)[0] == "203.0.113.41:5555"
+    assert go(adbops.adb_ready(BEDROOM)) == ("203.0.113.8:5555", "device")
+    assert adbops.serial_of(BEDROOM) == "203.0.113.8:5555"
+    assert adbops.candidates(BEDROOM)[0] == "203.0.113.8:5555"
     fake.calls.clear()
     go(adbops.adb_ready(BEDROOM, fresh=True))
-    assert "192.0.2.32" not in fake.calls[0]
+    assert "192.0.2.7" not in fake.calls[0]
     monkeypatch.setattr(adbops, "PATH_MEMORY_S", 0)
-    assert adbops.candidates(BEDROOM)[0] == "192.0.2.32:5555"
+    assert adbops.candidates(BEDROOM)[0] == "192.0.2.7:5555"
 
 
 def test_offline_error_names_every_path_tried(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -119,7 +119,7 @@ def test_offline_error_names_every_path_tried(monkeypatch: pytest.MonkeyPatch) -
         go(adbops.require_device(BEDROOM))
     text = str(err.value)
     assert "adb state is 'offline'" in text
-    for host in ("192.0.2.32:5555", "203.0.113.41:5555", "bed-a.example.ts.net"):
+    for host in ("192.0.2.7:5555", "203.0.113.8:5555", "bed-a.example.ts.net"):
         assert host in text
 
 
