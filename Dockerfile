@@ -6,7 +6,7 @@ ARG ANDROID_TOOLS=35.0.2-r21
 RUN apk add --no-cache "android-tools=${ANDROID_TOOLS}" bash yq-go openssh-client-default \
     && adb version | grep -qx "Version ${ANDROID_TOOLS%-r*}-android-tools"
 WORKDIR /app
-COPY --from=ghcr.io/astral-sh/uv:0.13.6@sha256:af22a52f5eafef3d78e551599d405c02df61919d18028f0cea8eda93bc9986d0 /uv /usr/local/bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.13.9@sha256:d3b601f0c7b118bc1753febf7c41cc80981df678445e0254284eecf84db79a7d /uv /usr/local/bin/uv
 COPY pyproject.toml uv.lock ./
 ENV UV_PROJECT_ENVIRONMENT=/usr/local UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=never
 RUN uv sync --locked --no-dev --no-install-project
