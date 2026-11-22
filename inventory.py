@@ -60,8 +60,8 @@ ERROR_HINTS = (
     ),
     (
         "offline",
-        "The device did not answer over ADB on its LAN address or its Tailscale name.",
-        "Check it is powered and on the network. The LAN address and the tailnet name are both tried; if both fail, check the site's router or subnet route and that Tailscale is connected.",
+        "The device did not answer over ADB on any address listed after 'tried'.",
+        "Check it is powered and on the network. The LAN route (site subnet router), tailnet_ip, and tailnet_fqdn from devices.yml are tried in turn; if all fail, check the site's router and that Tailscale is connected on the device.",
     ),
 )
 DEFAULT_HINT = (
@@ -131,6 +131,13 @@ async def load_denied_apps() -> list[str]:
 
 async def load_quick_apps() -> list[dict[str, Any]]:
     return await _yq(".quick_apps // []") or []
+
+
+async def load_message_policy() -> dict[str, Any]:
+    policy = await _yq(".messages")
+    if not isinstance(policy, dict) or not policy:
+        raise DeviceError(f"no messages: policy block in {DEVICES_FILE}")
+    return policy
 
 
 def check_app_allowed(app: str, denied: list[str]) -> None:

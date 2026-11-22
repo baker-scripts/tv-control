@@ -53,6 +53,12 @@ class FakeTv:
     async def volume_down(self) -> None:
         self.sent.append(("volume_down", None))
 
+    async def get_volume(self) -> int:
+        return 41
+
+    async def get_muted(self) -> bool:
+        return False
+
     async def set_mute(self, value: bool) -> None:
         self.sent.append(("mute", value))
 
@@ -67,6 +73,13 @@ class FakeTv:
 
     async def send_message(self, text: str) -> None:
         self.sent.append(("toast", text))
+
+    async def get_sound_output(self) -> str:
+        return "external_arc"
+
+    async def request(self, uri: str, payload: dict[str, Any]) -> dict[str, Any]:
+        self.sent.append((uri, payload))
+        return {"settings": {"simplinkEnable": "on"}}
 
 
 @pytest.fixture(autouse=True)
@@ -123,7 +136,7 @@ def test_ws_close_frame_is_retried() -> None:
     paired()
     FakeTv.fail = aiohttp.WSMessageTypeError
     body = go(webos.status(DEV))
-    assert body["webos_state"] == "unreachable" and len(FakeTv.instances) == 2
+    assert body["webos_state"] == "standby" and len(FakeTv.instances) == 2
 
 
 def test_call_wraps_unexpected_errors() -> None:
@@ -146,7 +159,9 @@ def test_call_wraps_unexpected_errors() -> None:
 )
 def test_send_key(key: str, sent: tuple[str, Any]) -> None:
     paired()
-    assert go(webos.send_key(DEV, key)) == {"sent": key}
+    result = go(webos.send_key(DEV, key))
+    assert result["sent"] == key
+    assert ("volume" in result) == key.startswith("VOLUME")
     assert FakeTv.instances[-1].sent == [sent]
 
 
@@ -178,15 +193,29 @@ def test_lists_and_switching() -> None:
             go(webos.toast(DEV, bad))
 
 
+def test_audio_settings_reads_only() -> None:
+    paired()
+    assert go(webos.audio_settings(DEV)) == {
+        "sound_output": "external_arc",
+        "simplink": "on",
+    }
+    assert FakeTv.instances[0].sent == [
+        (
+            "settings/getSystemSettings",
+            {"category": "other", "keys": ["simplinkEnable"]},
+        )
+    ]
+
+
 def test_wake_preconditions(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     with pytest.raises(DeviceError, match="no valid mac"):
         go(webos.wake(DEV))
-    dev = {**DEV, "mac": "00:00:5e:00:53:01"}
+    dev = {**DEV, "mac": "aa:bb:cc:dd:ee:ff"}
     sites: dict[str, Any] = {}
     monkeypatch.setattr(webos, "load_sites", AsyncMock(side_effect=lambda: sites))
     with pytest.raises(DeviceError, match="no wol_relay"):
         go(webos.wake(dev))
-    sites["home"] = {"wol_relay": "relay@wol.example"}
+    sites["home"] = {"wol_relay": "wol@relay"}
     monkeypatch.setattr(webos, "WOL_KEY", tmp_path / "missing-key")
     with pytest.raises(DeviceError, match="key missing"):
         go(webos.wake(dev))
@@ -199,16 +228,13 @@ def test_wake_runs_ssh_relay(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) ->
     monkeypatch.setattr(
         webos,
         "load_sites",
-        AsyncMock(return_value={"home": {"wol_relay": "relay@wol.example"}}),
+        AsyncMock(return_value={"home": {"wol_relay": "wol@relay"}}),
     )
     ssh = AsyncMock(return_value=(0, b"", ""))
     monkeypatch.setattr(webos, "run", ssh)
-    dev = {**DEV, "mac": "00:00:5e:00:53:01"}
-    assert go(webos.wake(dev)) == {
-        "wol_sent": "00:00:5e:00:53:01",
-        "via": "relay@wol.example",
-    }
-    assert ssh.await_args.args[-2:] == ("wol", "00:00:5e:00:53:01")
+    dev = {**DEV, "mac": "aa:bb:cc:dd:ee:ff"}
+    assert go(webos.wake(dev)) == {"wol_sent": "aa:bb:cc:dd:ee:ff", "via": "wol@relay"}
+    assert ssh.await_args.args[-2:] == ("wol", "aa:bb:cc:dd:ee:ff")
     ssh.return_value = (255, b"", "refused")
     with pytest.raises(DeviceError, match="refused"):
         go(webos.wake(dev))

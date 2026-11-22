@@ -1,15 +1,19 @@
 """ADB calls for Shields and Fire OS devices, on the shared local ADB server.
 
-No function here runs the adb disconnect command: it would drop the device for every other client of the shared ADB server.
+No function here runs the adb disconnect command: it would drop the device for androidtv-watcher and the scripts.
 """
 
 import asyncio
+import gzip
+import html
 import io
 import json
 import os
 import re
+import struct
 import tempfile
 import time
+import zlib
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import quote
@@ -19,8 +23,25 @@ from inventory import DeviceError, run
 from PIL import Image as PILImage
 
 ADB_TIMEOUT_S = 20
+# A device that answered get-state "device" is trusted this long; the next command skips the probe.
+READY_TTL_S = 15.0
 SCREENCAP_TIMEOUT_S = 90
 SCREENSHOT_MAX_PX = 1280
+# screenrecord frames mode scales one RGB frame on the GPU, with no PNG encode. Its header is five
+# little-endian uint32 values: packet length, width, height, stride, pixel format (3 = RGB_888).
+FRAME_W, FRAME_H = 1280, 720
+FRAME_PIXEL_BYTES = FRAME_W * FRAME_H * 3
+FRAME_HEADER = struct.pack(
+    "<5I", 16 + FRAME_PIXEL_BYTES, FRAME_W, FRAME_H, FRAME_W * 3, 3
+)
+# adbd forwards a pipe in small packets, one per network round trip (140 KB/s over the subnet route).
+# `cat` of a file sends large packets (1 MB/s), so each capture goes to a file first.
+FAST_CAPTURE = (
+    "f=/data/local/tmp/tv-control-$$.gz;"
+    f"(timeout -s INT 3 screenrecord --size {FRAME_W}x{FRAME_H} --output-format=frames - 2>/dev/null </dev/null &)"
+    f"|head -c {len(FRAME_HEADER) + FRAME_PIXEL_BYTES}|gzip -1 >$f;cat $f;rm -f $f"
+)
+PNG_CAPTURE = "f=/data/local/tmp/tv-control-$$.png;screencap -p $f;cat $f;rm -f $f"
 BLACK_MAX_LEVEL = 16
 SMARTTUBE_PKG = "org.smarttube.stable"
 ADB_TYPES = frozenset({"shield", "firestick", "firetv"})
@@ -71,8 +92,8 @@ UNDO_KEYS = (
     ("secure", "accessibility_enabled"),
     ("secure", "key_app_map"),
     ("secure", "sleep_timeout"),
-    ("global", "always_on_vpn_app"),
-    ("global", "always_on_vpn_lockdown"),
+    ("secure", "always_on_vpn_app"),
+    ("secure", "always_on_vpn_lockdown"),
     ("global", "private_dns_mode"),
 )
 
@@ -93,32 +114,67 @@ def check_pkg(pkg: str) -> str:
 
 # Serial that last reached a device; health and lockdown reuse it instead of re-probing.
 _active: dict[str, str] = {}
+# Connection pool: device name -> (serial, monotonic time of the last confirmed "device" state).
+_ready: dict[str, tuple[str, float]] = {}
+# When a serial last answered "device"; for PATH_MEMORY_S it is tried first, so a dead LAN
+# address does not cost a timeout on every probe.
+_path_at: dict[str, float] = {}
+PATH_MEMORY_S = 600.0
 
 
 def candidates(dev: dict[str, Any]) -> list[str]:
-    """ADB serials to try in order: the primary ip, then the MagicDNS name."""
+    """ADB serials to try: the path that last worked (if recent), then ip, tailnet_ip, MagicDNS name."""
     port = dev.get("port") or 5555
-    hosts = dict.fromkeys(h for h in (dev.get("ip"), dev.get("tailnet_fqdn")) if h)
-    return [f"{h}:{port}" for h in hosts]
+    keys = ("ip", "tailnet_ip", "tailnet_fqdn")
+    hosts = dict.fromkeys(str(dev[k]) for k in keys if dev.get(k))
+    serials = [f"{h}:{port}" for h in hosts]
+    last = _active.get(dev["name"])
+    fresh = time.monotonic() - _path_at.get(dev["name"], float("-inf")) < PATH_MEMORY_S
+    if last in serials and fresh:
+        serials.remove(last)
+        serials.insert(0, last)
+    return serials
 
 
 def serial_of(dev: dict[str, Any]) -> str:
     return _active.get(dev["name"]) or candidates(dev)[0]
 
 
+def forget_ready(serial: str) -> None:
+    """Drop pooled readiness for a serial so the next command probes and reconnects."""
+    for name in [n for n, (s, _) in _ready.items() if s == serial]:
+        del _ready[name]
+
+
 async def adb(
     serial: str, *args: str, timeout: float = ADB_TIMEOUT_S
 ) -> tuple[int, bytes, str]:
-    return await run("adb", "-s", serial, *args, timeout=timeout)
+    try:
+        reply = await run("adb", "-s", serial, *args, timeout=timeout)
+    except DeviceError:
+        forget_ready(serial)
+        raise
+    if reply[0] != 0:
+        forget_ready(serial)
+    return reply
 
 
-async def adb_ready(dev: dict[str, Any]) -> tuple[str, str]:
-    """Connect if needed and return (serial, state), trying each candidate address."""
+async def adb_ready(dev: dict[str, Any], fresh: bool = False) -> tuple[str, str]:
+    """Connect if needed and return (serial, state), trying each candidate address.
+
+    A pooled serial confirmed within READY_TTL_S is returned without a probe unless fresh=True.
+    """
+    pooled = _ready.get(dev["name"])
+    if not fresh and pooled and time.monotonic() - pooled[1] < READY_TTL_S:
+        return pooled[0], "device"
     best: tuple[str, str] = (candidates(dev)[0], "offline")
     for serial in candidates(dev):
         serial, state = await _ready_one(dev, serial)
         if state == "device":
             _active[dev["name"]] = serial
+            now = time.monotonic()
+            _ready[dev["name"]] = (serial, now)
+            _path_at[dev["name"]] = now
             return serial, state
         if state == "unauthorized":
             best = (serial, state)
@@ -141,7 +197,9 @@ async def _ready_one(dev: dict[str, Any], serial: str) -> tuple[str, str]:
 async def require_device(dev: dict[str, Any]) -> str:
     serial, state = await adb_ready(dev)
     if state != "device":
-        raise DeviceError(f"adb state is {state!r}, not device")
+        raise DeviceError(
+            f"adb state is {state!r}, not device; tried {', '.join(candidates(dev))}"
+        )
     return serial
 
 
@@ -158,7 +216,7 @@ async def read(serial: str, command: str) -> str:
 
 
 async def status(dev: dict[str, Any]) -> dict[str, Any]:
-    serial, state = await adb_ready(dev)
+    serial, state = await adb_ready(dev, fresh=True)
     body: dict[str, Any] = {"adb_state": state}
     if state != "device":
         return body
@@ -173,21 +231,188 @@ async def status(dev: dict[str, Any]) -> dict[str, Any]:
 HEALTH_READS = {
     "private_dns_mode": "settings get global private_dns_mode",
     "private_dns_specifier": "settings get global private_dns_specifier",
-    "always_on_vpn_app": "settings get global always_on_vpn_app",
+    "always_on_vpn_app": "settings get secure always_on_vpn_app",
     "accessibility_services": "settings get secure enabled_accessibility_services",
     "resumed_activity": "dumpsys activity activities | grep -m1 -E 'mResumedActivity|topResumedActivity'",
 }
 
 
-PLAYBACK_PLAYING_RE = re.compile(r"PlaybackState \{state=3\b")
+PLAYBACK_STATE_RE = re.compile(r"PlaybackState \{state=(\d+)(?=[,\s}])")
 
 
-def is_awake(power_dump: str) -> bool:
-    return "mWakefulness=Awake" in power_dump
+def is_awake(power_dump: str) -> bool | None:
+    states = re.findall(r"^\s*mWakefulness=(\S+)\s*$", power_dump, re.MULTILINE)
+    if len(states) != 1:
+        return None
+    if states[0] == "Awake":
+        return True
+    if states[0] in {"Asleep", "Dreaming", "Dozing"}:
+        return False
+    return None
 
 
-def is_playing(session_dump: str) -> bool:
-    return bool(PLAYBACK_PLAYING_RE.search(session_dump))
+def is_playing(session_dump: str) -> bool | None:
+    states = [int(value) for value in PLAYBACK_STATE_RE.findall(session_dump)]
+    if not states or len(states) != session_dump.count("PlaybackState"):
+        return None
+    # Android treats buffering, connecting, seeking, and skipping as active playback.
+    if any(state in {3, 4, 5, 6, 8, 9, 10, 11} for state in states):
+        return True
+    if all(state in {0, 1, 2} for state in states):
+        return False
+    return None
+
+
+# android.media.session.PlaybackState constants.
+PLAYBACK_STATE_NAMES = {
+    0: "none",
+    1: "stopped",
+    2: "paused",
+    3: "playing",
+    4: "fast_forwarding",
+    5: "rewinding",
+    6: "buffering",
+    7: "error",
+    8: "connecting",
+    9: "skipping_to_previous",
+    10: "skipping_to_next",
+    11: "skipping_to_queue_item",
+}
+RESUMED_RE = re.compile(
+    r"(?:mResumedActivity|topResumedActivity)[=:]\s*ActivityRecord\{\S+ u\d+ ([A-Za-z0-9_.]+)/([A-Za-z0-9_.$]+)"
+)
+NODE_TAG_RE = re.compile(r"<node\s([^>]*)>")
+NODE_ATTR_RE = re.compile(r'([A-Za-z-]+)="([^"]*)"')
+BOUNDS_RE = re.compile(r"^\[(\d+),(\d+)\]\[(\d+),(\d+)\]$")
+RESUMED_READ = (
+    "dumpsys activity activities | grep -m1 -E 'mResumedActivity|topResumedActivity'"
+)
+SESSIONS_READ = "dumpsys media_session | grep -E '^      (package=|active=|state=PlaybackState|metadata:)'"
+UI_DUMP = (
+    "f=/data/local/tmp/tv-control-ui-$$.xml;uiautomator dump $f >/dev/null 2>&1;"
+    "cat $f 2>/dev/null;rm -f $f"
+)
+
+
+def parse_resumed(text: str) -> tuple[str | None, str | None]:
+    match = RESUMED_RE.search(text)
+    if not match:
+        return None, None
+    pkg, activity = match.groups()
+    return pkg, pkg + activity if activity.startswith(".") else activity
+
+
+def parse_sessions(dump: str) -> list[dict[str, Any]]:
+    """Media sessions in dumpsys order: package, active, state name, and metadata title."""
+    sessions: list[dict[str, Any]] = []
+    for line in dump.splitlines():
+        text = line.strip()
+        if text.startswith("package="):
+            sessions.append(
+                {
+                    "package": text.removeprefix("package="),
+                    "active": None,
+                    "state": None,
+                    "title": None,
+                    "description": None,
+                }
+            )
+        elif not sessions:
+            continue
+        elif text.startswith("active="):
+            sessions[-1]["active"] = text == "active=true"
+        elif text.startswith("state=PlaybackState"):
+            match = PLAYBACK_STATE_RE.search(text)
+            if match:
+                code = int(match.group(1))
+                sessions[-1]["state"] = PLAYBACK_STATE_NAMES.get(code, str(code))
+        elif text.startswith("metadata:"):
+            match = re.search(r"description=(.*)$", text)
+            if match:
+                desc = match.group(1)
+                sessions[-1]["description"] = desc
+                first = desc.split(", ")[0]
+                sessions[-1]["title"] = None if first == "null" else first
+    return sessions
+
+
+def parse_focus(dump: str) -> dict[str, Any] | None:
+    """The last node in document order with focused="true" in a uiautomator dump, or None.
+
+    Tags are read with a regex, not an XML parser: the dump is one flat attribute format and
+    device output stays untrusted.
+    """
+    nodes = [
+        {k: html.unescape(v) for k, v in NODE_ATTR_RE.findall(tag)}
+        for tag in NODE_TAG_RE.findall(dump)
+    ]
+    focused = [n for n in nodes if n.get("focused") == "true"]
+    if not focused:
+        return None
+    node = focused[-1]
+    match = BOUNDS_RE.match(node.get("bounds", ""))
+    return {
+        "package": node.get("package"),
+        "class": node.get("class"),
+        "text": node.get("text"),
+        "content_desc": node.get("content-desc"),
+        "resource_id": node.get("resource-id"),
+        "bounds": [int(v) for v in match.groups()] if match else None,
+    }
+
+
+ACTIVE_STATES = frozenset(PLAYBACK_STATE_NAMES[c] for c in (3, 4, 5, 6, 8, 9, 10, 11))
+
+
+async def current_screen(dev: dict[str, Any], focus: bool = True) -> dict[str, Any]:
+    """Read-only screen state: wakefulness, resumed app, focus window, media sessions, focused view."""
+    serial = await require_device(dev)
+    power = await read(serial, "dumpsys power | grep mWakefulness=")
+    match = re.search(r"mWakefulness=(\S+)", power)
+    pkg, activity = parse_resumed(await read(serial, RESUMED_READ))
+    window = (await read(serial, "dumpsys window | grep mCurrentFocus")).strip()
+    sessions = parse_sessions(await read(serial, SESSIONS_READ))
+    body: dict[str, Any] = {
+        "awake": is_awake(power),
+        "wakefulness": match.group(1) if match else None,
+        "package": pkg,
+        "activity": activity,
+        "window": window.splitlines()[0] if window else None,
+        "playing": any(s["state"] in ACTIVE_STATES for s in sessions),
+        "sessions": sessions,
+    }
+    if focus:
+        body["focus"] = parse_focus(await read(serial, UI_DUMP))
+        if body["focus"] is None:
+            body["focus_note"] = (
+                "uiautomator found no focused view (dump failed, video surface, or nothing focused)"
+            )
+    return body
+
+
+def session_for(
+    sessions: list[dict[str, Any]], pkg: str | None
+) -> dict[str, Any] | None:
+    """The foreground app's session, else the first active one that plays."""
+    own = [s for s in sessions if s["package"] == pkg]
+    if own:
+        return own[0]
+    return next((s for s in sessions if s["state"] in ACTIVE_STATES), None)
+
+
+async def what_is_on(dev: dict[str, Any]) -> dict[str, Any]:
+    screen = await current_screen(dev, focus=False)
+    session = session_for(screen["sessions"], screen["package"])
+    state = (session or {}).get("state") or "none"
+    return {
+        "app": screen["package"],
+        "awake": screen["awake"],
+        "state": state,
+        "playing": state in ACTIVE_STATES,
+        "title": (session or {}).get("title"),
+        "description": (session or {}).get("description"),
+        "session_app": (session or {}).get("package"),
+    }
 
 
 async def health(dev: dict[str, Any]) -> dict[str, Any]:
@@ -198,38 +423,69 @@ async def health(dev: dict[str, Any]) -> dict[str, Any]:
     body["via"] = serial
     for field, cmd in HEALTH_READS.items():
         body[field] = (await read(serial, cmd)).strip() or None
-    if dev.get("paired_tv"):
-        body["awake"] = is_awake(
-            await read(serial, "dumpsys power | grep mWakefulness=")
-        )
-        body["playing"] = is_playing(
-            await read(serial, "dumpsys media_session | grep 'state=PlaybackState'")
-        )
+    if dev.get("paired_tv") or dev.get("type") == "shield":
+        body["awake"] = is_awake(await shell(serial, "dumpsys power"))
+        body["playing"] = is_playing(await shell(serial, "dumpsys media_session"))
     return body
 
 
 async def screenshot(dev: dict[str, Any]) -> tuple[bytes, str | None]:
     serial = await require_device(dev)
-    # A 4K PNG is about 4.5 MB and takes about 35 s over the subnet route.
+    if dev["type"] == "shield":
+        fast = await _fast_capture(serial)
+        if fast:
+            return fast, None
     rc, png, err = await adb(
-        serial, "exec-out", "screencap", "-p", timeout=SCREENCAP_TIMEOUT_S
+        serial, "exec-out", PNG_CAPTURE, timeout=SCREENCAP_TIMEOUT_S
     )
     if rc != 0 or not png.startswith(b"\x89PNG"):
         raise DeviceError(f"screencap failed: {err or 'no PNG data'}")
     return await asyncio.to_thread(shrink, png, dev["type"] in FIRE_TYPES)
 
 
+async def _fast_capture(serial: str) -> bytes | None:
+    """One scaled frame as a JPEG. None means the caller must use screencap."""
+    try:
+        rc, data, _ = await adb(serial, "exec-out", FAST_CAPTURE)
+    except DeviceError:
+        return None
+    return await asyncio.to_thread(frame_to_jpeg, data) if rc == 0 else None
+
+
+def frame_to_jpeg(data: bytes) -> bytes | None:
+    """None for a bad frame or a black one, which screencap must confirm."""
+    try:
+        raw = gzip.decompress(data)
+    except (OSError, EOFError, zlib.error):
+        return None
+    if len(raw) != len(FRAME_HEADER) + FRAME_PIXEL_BYTES or not raw.startswith(
+        FRAME_HEADER
+    ):
+        return None
+    rgb = PILImage.frombytes("RGB", (FRAME_W, FRAME_H), raw[len(FRAME_HEADER) :])
+    return None if _is_black(rgb) else _jpeg(rgb)
+
+
+def _is_black(rgb: PILImage.Image) -> bool:
+    return (
+        max(hi for _, hi in cast(tuple[tuple[int, int], ...], rgb.getextrema()))
+        < BLACK_MAX_LEVEL
+    )
+
+
+def _jpeg(rgb: PILImage.Image) -> bytes:
+    rgb.thumbnail((SCREENSHOT_MAX_PX, SCREENSHOT_MAX_PX))
+    buf = io.BytesIO()
+    rgb.save(buf, format="JPEG", quality=80)
+    return buf.getvalue()
+
+
 def shrink(png: bytes, fire: bool) -> tuple[bytes, str | None]:
     """Downscale to a JPEG MCP clients accept, and flag an all-black frame."""
     with PILImage.open(io.BytesIO(png)) as img:
         rgb = img.convert("RGB")
-    black = (
-        max(hi for _, hi in cast(tuple[tuple[int, int], ...], rgb.getextrema()))
-        < BLACK_MAX_LEVEL
-    )
-    rgb.thumbnail((SCREENSHOT_MAX_PX, SCREENSHOT_MAX_PX))
-    buf = io.BytesIO()
-    rgb.save(buf, format="JPEG", quality=80)
+    black = _is_black(rgb)
+    jpeg = _jpeg(rgb)
     note = None
     if black:
         note = "all-black frame" + (
@@ -237,7 +493,7 @@ def shrink(png: bytes, fire: bool) -> tuple[bytes, str | None]:
             if fire
             else ""
         )
-    return buf.getvalue(), note
+    return jpeg, note
 
 
 async def send_key(dev: dict[str, Any], key: str) -> dict[str, Any]:
@@ -258,6 +514,20 @@ def _shell_alive(proc: asyncio.subprocess.Process | None) -> bool:
         and proc.stdin is not None
         and not proc.stdin.is_closing()
     )
+
+
+TEXT_SAFE_RE = re.compile(r"[A-Za-z0-9 .,_@+=/:-]{1,200}")
+
+
+async def send_text(dev: dict[str, Any], text: str) -> dict[str, Any]:
+    """Type into the focused field with `input text`; the safe set avoids shell metacharacters."""
+    if not TEXT_SAFE_RE.fullmatch(text):
+        raise DeviceError(
+            "text must be 1-200 characters of letters, digits, spaces, and . , _ @ + = / : -"
+        )
+    serial = await require_device(dev)
+    await shell(serial, f"input text '{text.replace(' ', '%s')}'")
+    return {"typed": len(text), "via": "adb input text"}
 
 
 async def send_key_fast(dev: dict[str, Any], key: str) -> dict[str, Any]:
@@ -322,6 +592,25 @@ async def launch(dev: dict[str, Any], pkg: str) -> dict[str, Any]:
     return {"launched": pkg, "via": "am start", "component": component}
 
 
+VIEW_URI_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://[A-Za-z0-9/:.?=&_%-]+$")
+
+
+async def view_uri(dev: dict[str, Any], uri: str, pkg: str) -> dict[str, Any]:
+    """Start a VIEW intent for a deep link, limited to one package. The URI is quoted for the device shell."""
+    if not VIEW_URI_RE.match(uri):
+        raise DeviceError(f"invalid deep link {uri!r}")
+    serial = await require_device(dev)
+    rc, out, err = await adb(
+        serial,
+        "shell",
+        f"am start -a android.intent.action.VIEW -d '{uri}' -p {check_pkg(pkg)}",
+    )
+    text = out.decode(errors="replace").strip()
+    if rc != 0 or "Error" in text:
+        raise DeviceError(f"am start failed: {err or text}"[:300])
+    return {"started": uri, "package": pkg}
+
+
 TV_INPUT_ID_RE = re.compile(r"^[A-Za-z0-9_.$]+/[A-Za-z0-9_.$]+/[A-Za-z0-9_]+$")
 
 
@@ -352,6 +641,22 @@ async def set_input(dev: dict[str, Any], tv_input_id: str) -> dict[str, Any]:
     return {"input_set": tv_input_id, "via": "am start passthrough", "resumed": resumed}
 
 
+INPUT_KEY_RE = re.compile(r"^TV_INPUT_[A-Z0-9_]+$")
+
+
+async def set_input_key(dev: dict[str, Any], key: str) -> dict[str, Any]:
+    """Switch a Fire TV input with a TV_INPUT_* keyevent. Never wakes the TV."""
+    if not INPUT_KEY_RE.match(key):
+        raise DeviceError(f"invalid input key {key!r}")
+    serial = await require_device(dev)
+    if not is_awake(await read(serial, "dumpsys power")):
+        raise DeviceError("TV is asleep; input not switched (set_input does not wake)")
+    rc, _, err = await adb(serial, "shell", "input", "keyevent", f"KEYCODE_{key}")
+    if rc != 0:
+        raise DeviceError(f"keyevent failed: {err}")
+    return {"input_set": key, "via": "keyevent"}
+
+
 REMOTE_LOCATOR = "com.nvidia.remotelocator/.ShieldRemoteLocatorActivity"
 TOAST_MAX_CHARS = 200
 TOAST_SAFE_RE = re.compile(r"[^A-Za-z0-9 .,!?:;()_@#%&+=/-]")
@@ -375,23 +680,136 @@ def clean_toast(message: str) -> str:
     return text
 
 
-async def toast(dev: dict[str, Any], message: str) -> dict[str, Any]:
-    """Post a heads-up notification with cmd notification (no root, Android 11+)."""
-    text = clean_toast(message)
-    serial = await require_device(dev)
-    rc, out, err = await adb(
-        serial,
-        "shell",
-        f"cmd notification post -S bigtext -t 'tv-control' tvcontrol '{text}'",
+# Android TV shows no heads-up notifications, so `cmd notification post` lands only in the
+# notification list (seen 2026-11-22 on a Shield). TvOverlay draws over the current app.
+# Source: https://github.com/gugutab/TvOverlay (REST API: POST /notify on port 5001).
+OVERLAY_PKG = "com.tabdeveloper.tvoverlay"
+OVERLAY_PORT = 5001
+OVERLAY_SECONDS = 8
+OVERLAY_SETTLE_S = 1.0
+OVERLAY_INSTALL = (
+    f"Install TvOverlay ({OVERLAY_PKG}) from the Play Store, run "
+    f"`appops set {OVERLAY_PKG} SYSTEM_ALERT_WINDOW allow` and "
+    f"`dumpsys deviceidle whitelist +{OVERLAY_PKG}`, then open the app once"
+)
+WINDOW_READ = "dumpsys window windows | grep -E '^  Window #|package=|mViewVisibility=|mHasSurface='"
+
+
+def visible_windows(dump: str, pkg: str) -> int:
+    """Count windows owned by pkg that are visible and have a surface."""
+    count = 0
+    for block in re.split(r"^  Window #", dump, flags=re.MULTILINE)[1:]:
+        if (
+            re.search(rf"\bpackage={re.escape(pkg)}(\s|$)", block)
+            and "mViewVisibility=0x0 " in block
+            and "mHasSurface=true " in block
+        ):
+            count += 1
+    return count
+
+
+def overlay_payload(
+    text: str, title: str, seconds: int, corner: str = "", image: str = ""
+) -> dict[str, Any]:
+    """TvOverlay /notify body; title, message, duration, corner, and image are fields its README documents."""
+    body: dict[str, Any] = (
+        {"title": title, "message": text, "duration": seconds}
+        if title
+        else {"title": text, "duration": seconds}
     )
-    body = out.decode(errors="replace").strip()
-    if rc != 0 or "error" in body.lower() or "unknown command" in body.lower():
+    if corner:
+        body["corner"] = corner
+    if image:
+        body["image"] = image
+    return body
+
+
+async def device_minutes(dev: dict[str, Any]) -> int | None:
+    """Minutes since midnight on the device's own clock, or None when it cannot be read."""
+    serial = await require_device(dev)
+    match = re.search(r"(\d{1,2}):(\d{2})", await read(serial, "date +%H:%M"))
+    return int(match.group(1)) * 60 + int(match.group(2)) if match else None
+
+
+def overlay_http_post(port: int, path: str, body: dict[str, Any]) -> int:
+    """POST JSON to the adb-forwarded TvOverlay port on the adb server host; return the status."""
+    import urllib.error
+    import urllib.request
+
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}{path}",
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return int(resp.status)
+    except urllib.error.HTTPError as exc:
+        return int(exc.code)
+    except OSError as exc:
+        raise DeviceError(f"not_shown: TvOverlay did not answer: {exc}") from None
+
+
+async def _overlay_forward(serial: str, remote: int) -> int:
+    """Reuse this serial's adb forward to the TvOverlay port, or open one (no ACL change needed)."""
+    rc, out, err = await adb(serial, "forward", "--list")
+    if rc == 0:
+        for line in out.decode(errors="replace").splitlines():
+            parts = line.split()
+            if len(parts) == 3 and parts[0] == serial and parts[2] == f"tcp:{remote}":
+                return int(parts[1].removeprefix("tcp:"))
+    rc, out, err = await adb(serial, "forward", "tcp:0", f"tcp:{remote}")
+    text = out.decode(errors="replace").strip()
+    if rc != 0 or not text.isdigit():
+        raise DeviceError(f"not_shown: adb forward failed: {err or text}"[:300])
+    return int(text)
+
+
+async def toast(
+    dev: dict[str, Any],
+    message: str,
+    title: str = "",
+    seconds: int = OVERLAY_SECONDS,
+    corner: str = "",
+    image: str = "",
+) -> dict[str, Any]:
+    """Draw a message over the current app with TvOverlay; raise unless a visible overlay window is confirmed."""
+    text = clean_toast(message)
+    head = clean_toast(title) if title else ""
+    serial = await require_device(dev)
+    if "package:" not in await read(serial, f"pm path {OVERLAY_PKG}"):
+        raise DeviceError(f"overlay_app_missing: {OVERLAY_INSTALL}")
+    appop = await read(serial, f"appops get {OVERLAY_PKG} SYSTEM_ALERT_WINDOW")
+    if "allow" not in appop:
         raise DeviceError(
-            f"unsupported_on_device: toast via cmd notification failed: {err or body}"[
-                :300
-            ]
+            f"overlay_not_permitted: TvOverlay may not draw over apps; {OVERLAY_INSTALL}"
         )
-    return {"toast": text, "via": "cmd notification"}
+    if not is_awake(await read(serial, "dumpsys power | grep mWakefulness=")):
+        raise DeviceError(
+            "screen_not_on: the device is asleep or showing the screen saver; message not shown"
+        )
+    port = await _overlay_forward(serial, int(dev.get("overlay_port") or OVERLAY_PORT))
+    status = await asyncio.to_thread(
+        overlay_http_post,
+        port,
+        "/notify",
+        overlay_payload(text, head, seconds, corner, image),
+    )
+    if status != 200:
+        raise DeviceError(f"not_shown: TvOverlay answered HTTP {status}")
+    await asyncio.sleep(OVERLAY_SETTLE_S)
+    if not visible_windows(await read(serial, WINDOW_READ), OVERLAY_PKG):
+        raise DeviceError(
+            "not_shown: TvOverlay accepted the message but no visible overlay window followed"
+        )
+    return {
+        "toast": text,
+        "shown": True,
+        "via": "tvoverlay",
+        "seconds": seconds,
+        "check": "HTTP 200 and a visible TvOverlay window",
+    }
 
 
 def apk_label(path: str) -> str | None:

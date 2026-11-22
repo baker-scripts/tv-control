@@ -116,7 +116,6 @@ def test_netflix_never_reaches_button_data(
         }
     )
     monkeypatch.setattr(panel.tools, verb, action)
-    monkeypatch.setattr(panel, "load_denied_apps", AsyncMock(return_value=["netflix"]))
     apps = json.loads(call(endpoint, method="GET").body)["apps"]
     assert apps == [{"id": "safe.id", "title": "Plex"}]
 
@@ -141,7 +140,7 @@ def test_active_inventory_has_one_screen_per_device(
     assert 'data-dev="future"' not in page
     assert 'id="power-confirm"' in page
     assert "if(off&&!await confirmOff(card))return" in panel.JS
-    assert '<button data-act="power-on">Wake</button>' in page
+    assert '<button data-act="power-on">On</button>' in page
     assert 'class="app-search"' in page
 
 
@@ -429,18 +428,29 @@ def test_preview_response_and_failure(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_preview_markup_and_friendly_labels() -> None:
-    dev = {"name": "lg-nvidia-shield-living-room", "type": "shield"}
-    assert panel._friendly_name(dev) == "LG Living Room Shield"
-    assert panel._friendly_name({"name": "cabin-tv"}) == "Cabin TV"
+    dev = {"name": "den-nvidia-shield-family-room", "type": "shield"}
+    assert panel._friendly_name(dev) == "Den Family Room Shield"
+    assert panel._friendly_name({"name": "guest-tv"}) == "Guest TV"
     assert panel._friendly_name({"name": "x", "label": "Living room"}) == "Living room"
     admin = panel._card(dev, True)
     assert admin.index('class="preview"') < admin.index('class="remote"')
-    assert "Open live view" not in admin and "live view" not in admin.lower()
+    assert "Open live view" not in admin and "live.example.com" not in admin
     assert 'class="preview"' not in panel._card(dev, False)
     assert 'data-act="shot"' not in panel._card(dev, False)
     webos = panel._card({"name": "lg", "type": "webos"}, False)
     assert 'class="screen-info"' in webos and 'class="preview"' not in webos
     assert 'id="device-choices" hidden' not in panel.PAGE
+
+
+def test_best_effort_device_card_shows_badge() -> None:
+    card = panel._card(
+        {"name": "cabin-firestick", "type": "firestick", "tv_control": "best-effort"},
+        False,
+    )
+    assert panel.BEST_EFFORT_BADGE in card
+    assert panel.BEST_EFFORT_BADGE not in panel._card(
+        {"name": "x", "type": "shield"}, False
+    )
 
 
 def test_initial_device_selection_runs_javascript() -> None:
@@ -453,8 +463,8 @@ def test_initial_device_selection_runs_javascript() -> None:
         "const assert=require('node:assert/strict'); function initialDevice"
         + function
         + """
-const names=['first','living room','third'];
-assert.equal(initialDevice(names,'#device=living%20room','third'),'living room');
+const names=['first','family room','third'];
+assert.equal(initialDevice(names,'#device=family%20room','third'),'family room');
 assert.equal(initialDevice(names,'#device=missing','third'),'third');
 assert.equal(initialDevice(names,'#device=%zz','third'),'third');
 assert.equal(initialDevice(names,'','missing'),'first');
@@ -464,19 +474,61 @@ assert.equal(initialDevice([], '', null),undefined);
     subprocess.run(["node", "-e", code], check=True, capture_output=True)
 
 
+def test_status_polls_stay_under_browser_connection_limit_runs_javascript() -> None:
+    import subprocess
+
+    functions = panel.JS.split("const STATUS_LIMIT", 1)[1].split(
+        "\nfunction applyStatus", 1
+    )[0]
+    code = (
+        "const assert=require('node:assert/strict'); const STATUS_LIMIT"
+        + functions
+        + """
+const cards=['a','b','c','d'],state=new Map(cards.map(c=>[c,{}]));let selected='c';const open=[],seen=[];
+const request=(card)=>new Promise(resolve=>{open.push(resolve);seen.push(card);});
+const applyStatus=()=>{},statusFailed=()=>{};
+(async()=>{
+status(selected);cards.forEach(status);
+assert.equal(open.length,2);assert.deepEqual(seen,['c','a']);
+status('d');assert.equal(statusQueue.filter(c=>c==='d').length,1);
+while(open.length){open.shift()({});await new Promise(r=>setImmediate(r));assert.ok(open.length<=2);}
+assert.deepEqual(seen,['c','a','b','d']);assert.equal(statusRunning,0);
+})().catch(e=>{console.error(e);process.exitCode=1;});
+"""
+    )
+    subprocess.run(["node", "-e", code], check=True, capture_output=True)
+
+
+def test_volume_hold_repeat_is_slower_on_adb_devices_runs_javascript() -> None:
+    import subprocess
+
+    function = panel.JS.split("function repeatMs", 1)[1].split("\n", 1)[0]
+    code = (
+        "const assert=require('node:assert/strict'); function repeatMs"
+        + function
+        + """
+assert.equal(repeatMs({dataset:{type:'shield'}},'VOLUME_UP'),800);
+assert.equal(repeatMs({dataset:{type:'webos'}},'VOLUME_UP'),130);
+assert.equal(repeatMs({dataset:{type:'shield'}},'DPAD_UP'),130);
+"""
+    )
+    subprocess.run(["node", "-e", code], check=True, capture_output=True)
+
+
 def test_preview_visibility_and_refresh_schedule_runs_javascript() -> None:
     import subprocess
 
     functions = panel.JS.split("function previewVisible", 1)[1].split(
-        "\nfunction previewAges", 1
+        "\nconst screenDialog", 1
     )[0]
     code = (
         "const assert=require('node:assert/strict'); function previewVisible"
         + functions
         + """
-const button={},age={},box={getBoundingClientRect:()=>({top:10,bottom:200}),querySelector:s=>s==='.preview-refresh'?button:age};
-const card={hidden:false,dataset:{dev:'mock-tv'},querySelector:()=>box};
-let selected=card,document={hidden:false},navigator={onLine:true},window={innerHeight:800},calls=0,now=10000;
+const age={},box={getBoundingClientRect:()=>({top:10,bottom:200}),querySelector:()=>age};
+const card={hidden:false,dataset:{dev:'mock-tv'},querySelector:s=>s==='.preview-age'?age:box},cards=[card];
+const failure=()=>({error:'failed'});
+let selected=card,document={hidden:false},navigator={onLine:true},window={innerHeight:800},calls=0,now=100000;
 const st={online:true,previewBusy:false,previewAttempt:0},state=new Map([[card,st]]);
 Date.now=()=>now;
 const fetch=async()=>{calls++;return {ok:false,json:async()=>({error:'offline'})};};
@@ -490,10 +542,236 @@ box.getBoundingClientRect=()=>({top:900,bottom:1100});assert.equal(previewVisibl
 box.getBoundingClientRect=()=>({top:10,bottom:200});
 assert.equal(calls,0);
 await refreshPreview(card);assert.equal(calls,1);
-now+=4999;await refreshPreview(card);assert.equal(calls,1);
+now+=59999;await refreshPreview(card);assert.equal(calls,1);
 now+=1;await refreshPreview(card);assert.equal(calls,2);
-st.previewBusy=true;now+=5000;await refreshPreview(card);assert.equal(calls,2);
+assert.equal(age.textContent,'offline');
+st.previewBusy=true;now+=60000;await refreshPreview(card);assert.equal(calls,2);
+st.previewAttempt=now-3000;await refreshPreview(card,true);assert.equal(calls,2);assert.equal(age.textContent,'Capturing screen… 3s');
+st.previewBusy=false;st.online=false;await refreshPreview(card,true);assert.equal(calls,2);assert.equal(age.textContent,'Device is offline');
+st.online=true;await refreshPreview(card,true);assert.equal(calls,3);
 })().catch(e=>{console.error(e);process.exitCode=1;});
+"""
+    )
+    subprocess.run(["node", "-e", code], check=True, capture_output=True)
+
+
+def test_build_footer_links_commit_or_shows_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sha = "a" * 40
+    monkeypatch.setenv("TV_CONTROL_VERSION", "1.1.3")
+    monkeypatch.setenv("TV_CONTROL_GIT_SHA", sha)
+    footer = panel._build_footer()
+    assert "v1.1.3" in footer
+    assert f'href="{panel.COMMIT_URL}{sha}"' in footer
+    assert ">aaaaaaa<" in footer
+    for bad in ("", "unknown", '"><script>'):
+        monkeypatch.setenv("TV_CONTROL_GIT_SHA", bad)
+        footer = panel._build_footer()
+        assert "commit unknown" in footer
+        assert "<a " not in footer
+    monkeypatch.delenv("TV_CONTROL_VERSION")
+    assert "vunknown" in panel._build_footer()
+
+
+def test_build_info_carries_all_four_values(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    stamp = tmp_path / "BUILD_DATE"
+    stamp.write_text("2026-11-22T14:03:00Z\n")
+    monkeypatch.setattr(panel, "BUILD_DATE_FILE", stamp)
+    monkeypatch.setenv("TV_CONTROL_VERSION", "1.3.0")
+    monkeypatch.setenv("TV_CONTROL_GIT_SHA", "b" * 40)
+    monkeypatch.setenv("TV_CONTROL_GIT_DATE", "2026-11-22T09:15:00-06:00")
+    info = panel.build_info()
+    assert info == {
+        "version": "1.3.0",
+        "commit": "b" * 40,
+        "commit_date": "2026-11-22T09:15:00-06:00",
+        "build_date": "2026-11-22T14:03:00Z",
+    }
+    footer = panel._build_footer()
+    assert "v1.3.0" in footer and ">bbbbbbb<" in footer
+    assert "committed 2026-11-22 09:15 -06:00" in footer
+    assert "built 2026-11-22 14:03 UTC" in footer
+
+
+def test_build_info_shows_unknown_never_a_guess(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(panel, "BUILD_DATE_FILE", tmp_path / "missing")
+    for var in ("TV_CONTROL_VERSION", "TV_CONTROL_GIT_SHA"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("TV_CONTROL_GIT_DATE", "<script>")
+    assert set(panel.build_info().values()) == {"unknown"}
+    footer = panel._build_footer()
+    assert "committed unknown" in footer and "built unknown" in footer
+
+
+def test_version_endpoint_returns_build_info(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(panel, "build_info", lambda: {"version": "9"})
+    request = Request({"type": "http", "headers": headers()})
+    assert json.loads(asyncio.run(panel.version(request)).body) == {"version": "9"}
+    denied = Request({"type": "http", "headers": headers(key=None)})
+    assert asyncio.run(panel.version(denied)).status_code == 403
+    assert any(getattr(r, "path", "") == "/api/version" for r in panel.ROUTES)
+
+
+def test_page_has_build_footer_slot_and_status_paths() -> None:
+    assert 'id="build"' in panel.PAGE
+    assert "{{BUILD}}" not in panel.PAGE
+    assert 'class="paths muted"' in panel._card({"name": "mock-tv", "type": "firetv"})
+    assert "control_path" in panel.JS
+
+
+def test_control_path_adb_shield_and_webos(monkeypatch: pytest.MonkeyPatch) -> None:
+    import tools
+
+    shield = {
+        "name": "s",
+        "type": "shield",
+        "ip": "192.0.2.5",
+        "tailnet_fqdn": "s.ts.net",
+    }
+    monkeypatch.setattr(tools.adbops, "serial_of", lambda d: "192.0.2.5:5555")
+    assert tools.control_path(shield, "needs_pairing", None) == [
+        "ADB over LAN (site subnet route)",
+        "Wake: ADB WAKEUP key",
+        "Fast keys (Remote v2): needs pairing",
+        "TV control: full",
+    ]
+    monkeypatch.setattr(tools.adbops, "serial_of", lambda d: "s.ts.net:5555")
+    assert tools.control_path(shield, "ready", None)[0] == "ADB via tailnet name"
+    monkeypatch.setattr(tools.adbops, "serial_of", lambda d: "203.0.113.5:5555")
+    path = tools.control_path({**shield, "tailnet_ip": "203.0.113.5"}, None, None)
+    assert path[0] == "ADB via tailnet IP (LAN address not answering)"
+    tv = {"name": "t", "type": "webos", "mac": "aa", "tv_control": "best-effort"}
+    assert tools.control_path(tv, None, "wol@relay") == [
+        "webOS over LAN (port 3001)",
+        "Wake: Wake-on-LAN via wol@relay",
+        "TV control: best-effort",
+    ]
+    assert "Wake: no relay set" in tools.control_path(tv, None, None)
+
+
+def test_image_build_supplies_version_sha_and_dates() -> None:
+    root = Path(__file__).resolve().parents[1]
+    dockerfile = (root / "Dockerfile").read_text()
+    for arg in ("TV_CONTROL_VERSION", "TV_CONTROL_GIT_SHA", "TV_CONTROL_GIT_DATE"):
+        assert f"ARG {arg}=unknown" in dockerfile
+    assert "> /app/BUILD_DATE" in dockerfile
+    assert panel.BUILD_DATE_FILE.name == "BUILD_DATE"
+    ci = (root / ".github" / "workflows" / "ci.yml").read_text()
+    for arg in ("TV_CONTROL_VERSION=", "TV_CONTROL_GIT_SHA=", "TV_CONTROL_GIT_DATE="):
+        assert arg in ci
+
+
+@pytest.fixture
+def one_tap(monkeypatch: pytest.MonkeyPatch) -> dict[str, AsyncMock]:
+    mocks = {
+        "do_toast": AsyncMock(return_value={"toast": "hi", "shown": True}),
+        "do_go_home": AsyncMock(return_value={"confirmed": True}),
+        "do_open_app": AsyncMock(return_value={"confirmed": True}),
+        "do_what_is_on": AsyncMock(return_value={"app": "x", "playing": False}),
+        "in_use_refusal": AsyncMock(
+            return_value={
+                "device": "mock-tv",
+                "error": "in_use: someone may be watching",
+            }
+        ),
+    }
+    for verb, mock in mocks.items():
+        monkeypatch.setattr(panel.tools, verb, mock)
+    return mocks
+
+
+@pytest.mark.parametrize(
+    "what,body,verb",
+    [
+        ("home", {}, "do_go_home"),
+        ("open", {"app": "com.plexapp.android"}, "do_open_app"),
+    ],
+)
+def test_one_tap_actions_return_in_use_until_forced(
+    one_tap: dict[str, AsyncMock], what: str, body: dict[str, Any], verb: str
+) -> None:
+    resp = call(what, body, hdrs=headers("tv-site-home"))
+    assert resp.status_code == 200
+    assert json.loads(resp.body)["error"].startswith("in_use")
+    one_tap[verb].assert_not_called()
+    resp = call(what, {**body, "force": True}, hdrs=headers("tv-site-home"))
+    assert "error" not in json.loads(resp.body)
+    one_tap[verb].assert_awaited_once()
+    one_tap["in_use_refusal"].assert_awaited_once()
+
+
+def test_one_tap_actions_run_when_not_in_use(one_tap: dict[str, AsyncMock]) -> None:
+    one_tap["in_use_refusal"].return_value = None
+    assert json.loads(call("toast", {"message": "hi"}).body)["shown"] is True
+    call("open", {"app": "com.plexapp.android"})
+    one_tap["do_open_app"].assert_awaited_once_with("mock-tv", "com.plexapp.android")
+    call("home")
+    one_tap["do_go_home"].assert_awaited_once_with("mock-tv")
+
+
+def test_a_panel_message_shows_over_playback_and_records_the_user(
+    one_tap: dict[str, AsyncMock],
+) -> None:
+    resp = call("toast", {"message": "hi"}, hdrs=headers("tv-site-home"))
+    assert json.loads(resp.body)["shown"] is True
+    one_tap["do_toast"].assert_awaited_once_with("mock-tv", "hi", actor="tester")
+    one_tap["in_use_refusal"].assert_not_awaited()
+
+
+def test_message_history_route_lists_the_last_messages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = [{"time": 5, "text": "hi", "sender": "pat", "kind": "", "shown": True}]
+    monkeypatch.setattr(panel.messages, "history", lambda name: rows)
+    resp = call("messages", method="GET", hdrs=headers("tv-site-home"))
+    assert json.loads(resp.body) == {"device": "mock-tv", "messages": rows}
+
+
+def test_what_is_on_route_for_site_members(one_tap: dict[str, AsyncMock]) -> None:
+    resp = call("whatison", method="GET", hdrs=headers("tv-site-home"))
+    assert json.loads(resp.body)["app"] == "x"
+    one_tap["do_what_is_on"].assert_awaited_once_with("mock-tv")
+
+
+def test_card_has_now_on_one_tap_actions_message_and_notice() -> None:
+    card = panel._card({"name": "fire", "type": "firetv"}, admin=False)
+    assert 'class="now"' in card and 'aria-live="polite"' in card
+    assert 'data-act="home"' in card
+    assert card.index('class="message-form') < card.index('<details class="tools">')
+    assert 'class="notice"' in card and "Do it anyway" in card
+    assert 'class="offline-note"' in card
+
+
+def test_plain_error_words_run_javascript() -> None:
+    import subprocess
+
+    function = panel.JS.split("const PLAIN=", 1)[1].split("\n", 1)[0]
+    code = (
+        "const assert=require('node:assert/strict'); const PLAIN="
+        + function
+        + """
+assert.equal(plainError({error:'overlay_app_missing: Install TvOverlay'}),'The message app is not installed on this TV.');
+assert.equal(plainError({error:'screen_not_on: asleep'}),'The TV is asleep, so the message was not shown.');
+assert.equal(plainError({error:'in_use: someone may be watching this device'}),'Someone may be watching this TV.');
+assert.equal(plainError({error:'not_confirmed: x'}),'The app did not come to the front of the screen.');
+assert.equal(plainError({error:'weird thing'}),'weird thing');
+assert.equal(toastResult({shown:true}),'Message shown on the TV.');
+assert.equal(toastResult({toast:'hi'}),'Message sent. This TV does not confirm that it appeared.');
+assert.equal(plainError({error:'not_shown: dropped (asleep): x'}),'The TV is asleep, so the message was not shown.');
+assert.equal(plainError({error:'not_shown: dropped (quiet_hours): x'}),'It is quiet hours on this TV, so the message was not shown.');
+assert.equal(plainError({error:'wrong_household: x'}),'That message is for a different household.');
+const row=historyText({time:1700000000,text:'Dinner at six.',sender:'pat',kind:'operator_push',shown:true});
+assert.ok(row.includes('Dinner at six. · pat · operator_push · TV confirmed'));
+assert.ok(historyText({time:1,text:'x',sender:'',kind:'',shown:false}).endsWith('x · unknown · TV did not confirm'));
+assert.equal(nowText({awake:false}),'Asleep');
+assert.equal(nowText({awake:true,app_title:'Plex',state:'playing',title:'The Matrix'}),'Plex · Playing · The Matrix');
+assert.equal(nowText({awake:true,app_title:'Plex',state:'paused',title:null}),'Plex · Paused');
+assert.equal(nowText({awake:true,app_title:'Projectivy',state:'none'}),'Projectivy · Nothing playing');
 """
     )
     subprocess.run(["node", "-e", code], check=True, capture_output=True)

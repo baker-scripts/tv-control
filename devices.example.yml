@@ -6,6 +6,11 @@
 # paired_tv names the TV a Shield feeds; health reports it as standby unless the Shield plays.
 # input_ids (Fire TV only): input key -> Android TvInputInfo id, read from `dumpsys tv_input`.
 #   set_input refuses an input with no id. The switch is a passthrough intent and does not wake the TV.
+# input_keys (Fire TV only): input key -> Android keyevent name; tried before input_ids, for TVs whose
+#   passthrough intent opens the wrong screen.
+# tailnet_ip: a second address tried after ip and before tailnet_fqdn.
+# household: groups TVs for the message policy (messages.narration.households, assistant replies).
+# narration: every_step | start_end | off; overrides the household's narration depth for one device.
 devices:
   - name: living-room-shield
     label: Living Room Shield
@@ -13,13 +18,16 @@ devices:
     ip: 192.0.2.20
     tailnet_fqdn: living-room-shield.example.ts.net
     port: 5555
+    tailnet_ip: 203.0.113.20
     type: shield
+    household: family
     paired_tv: living-room-tv
     capabilities: [find_remote, power, sleep_timer]
   - name: living-room-tv
     site: home
     ip: 192.0.2.21
     type: webos
+    household: family
     mac: "00:00:5e:00:53:01"
     capabilities: [wake, power, inputs, sleep_timer]
     inputs:
@@ -30,6 +38,8 @@ devices:
     ip: 198.51.100.40
     port: 5555
     type: firestick
+    household: grandparents
+    narration: start_end
     tv_control: best-effort
     capabilities: [sleep_timer]
   - name: cabin-tv
@@ -38,9 +48,13 @@ devices:
     ip: 198.51.100.41
     port: 5555
     type: firetv
+    household: grandparents
     capabilities: [inputs, sleep_timer]
     inputs:
       hdmi1: Shield
+      hdmi2: Console
+    input_keys:
+      hdmi2: KEYCODE_TV_INPUT_HDMI_2
     input_ids:
       hdmi1: com.example.tvinput/.HdmiInputService/HW2
   - name: guest-room-shield
@@ -71,6 +85,34 @@ type_profiles:
   firetv:
     cec_on: [hdmi_control_auto_wakeup_enabled, hdmi_control_auto_device_off_enabled]
     keep_apps: [com.plexapp.android]
+
+# messages: the on-screen message policy (messages.py). Required for toast, narrate, and narrated verbs.
+# title: shown on every message. corner: TvOverlay corner (top_start, top_end, bottom_start, bottom_end).
+# duration: ceil(words * seconds_per_5_words / 5) seconds, clamped to floor_s..cap_s.
+# quiet_hours: device-local HH:MM; an unrequested message inside the window is dropped.
+# unrequested_kinds: the only notices a sender may push without a request (media_ready, reply_waiting,
+#   operator_push).
+# narration: every_step | start_end | off, by device (its narration: key), then household, then default.
+# assistant: name is shown in the narration intro ("Hi, this is <name>."); sender is the id the assistant
+#   passes as sender= to toast. Defaults: name "your TV assistant", sender "assistant".
+messages:
+  title: TV Helper
+  corner: top_end
+  duration:
+    seconds_per_5_words: 2
+    floor_s: 6
+    cap_s: 20
+  quiet_hours:
+    start: "22:00"
+    end: "07:00"
+  unrequested_kinds: [media_ready, reply_waiting, operator_push]
+  narration:
+    default: start_end
+    households:
+      grandparents: every_step
+  assistant:
+    name: TV Helper
+    sender: assistant
 
 # cidr: private LAN that scan_site probes (ADB 5555, webOS 3000/3001); empty means no routed LAN.
 # wol_relay: user@host on that LAN that sends Wake-on-LAN for the site's webOS TVs over SSH.

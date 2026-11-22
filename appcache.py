@@ -15,6 +15,8 @@ TTL_S = 24 * 3600
 
 FALLBACK_LABELS = {
     "com.plexapp.android": "Plex",
+    "com.netflix.ninja": "Netflix",
+    "com.netflix.mediaclient": "Netflix",
     "org.smarttube.stable": "SmartTube",
     "org.smarttube.beta": "SmartTube",
     "com.google.android.youtube.tv": "YouTube",

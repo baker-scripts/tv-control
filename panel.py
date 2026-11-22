@@ -1,7 +1,7 @@
 """Web panel on PANEL_PORT, behind a reverse proxy and an Authentik proxy provider.
 
-Every route except /healthz needs X-TV-Proxy-Key == TV_PROXY_KEY (set only by the reverse proxy, so
-the bind address cannot be called with forged X-authentik-* headers) and X-authentik-username.
+Every route except /healthz needs X-TV-Proxy-Key == TV_PROXY_KEY (set only by the reverse proxy, so the
+listening port cannot be called with forged X-authentik-* headers) and X-authentik-username.
 tv-admin may do everything; tv-site-<site> members see and drive only that site's devices, and
 only the USER_*_VERBS. Every POST writes one audit line to stdout.
 POST routes also need X-TV-Panel: 1, a custom header a cross-site form cannot send without a
@@ -23,9 +23,10 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
+import messages
 import scan
 import tools
-from inventory import DeviceError, load_denied_apps, load_devices
+from inventory import DeviceError, load_devices
 from starlette.datastructures import MutableHeaders
 from starlette.requests import Request
 from starlette.responses import (
@@ -45,11 +46,34 @@ PANEL_URL = os.environ.get("TV_PANEL_URL", "the panel URL")
 ADMIN_GROUP = "tv-admin"
 SITE_GROUP_PREFIX = "tv-site-"
 USER_POST_VERBS = frozenset(
-    {"key", "launch", "sleeptimer", "power", "wake", "input", "toast"}
+    {
+        "key",
+        "launch",
+        "sleeptimer",
+        "power",
+        "wake",
+        "input",
+        "toast",
+        "text",
+        "home",
+        "open",
+    }
 )
 USER_GET_VERBS = frozenset(
-    {"status", "health", "apps", "inputs", "quickapps", "sleeptimer"}
+    {
+        "status",
+        "health",
+        "apps",
+        "inputs",
+        "quickapps",
+        "sleeptimer",
+        "whatison",
+        "messages",
+    }
 )
+# One-tap actions answer in_use while someone may be watching; the page offers "Do it anyway".
+# A message is not one of them: the message policy shows it over playback.
+IN_USE_CHECKED = frozenset({"home", "open"})
 RATE_LIMIT_S = 5.0
 POWER_KEYS = frozenset({"SLEEP", "WAKEUP", "POWER"})
 _last_power: dict[str, float] = {}
@@ -58,9 +82,13 @@ audit = logging.getLogger("tv-control.audit")
 audit.addHandler(logging.StreamHandler(sys.stdout))
 audit.setLevel(logging.INFO)
 audit.propagate = False
+COMMIT_URL = os.environ.get(
+    "TV_CONTROL_COMMIT_URL", "https://github.com/baker-scripts/tv-control/commit/"
+)
 BEST_EFFORT_BADGE = "TV power/volume/input: best-effort (no CEC)"
 
 SLEEP_PRESETS = (15, 30, 60, 90)
+QUICK_PHRASES = ("youtube", "@gmail.com", ".com")
 
 
 def _user(request: Request) -> str | None:
@@ -186,6 +214,12 @@ def _card(dev: dict[str, Any], admin: bool = True) -> str:
     name = html.escape(dev["name"], quote=True)
     web = dev.get("type") == "webos"
     caps = dev.get("capabilities") or []
+    arrows = {
+        "Up": "M6 15l6-6 6 6",
+        "Left": "M15 6l-6 6 6 6",
+        "Right": "M9 6l6 6-6 6",
+        "Down": "M6 9l6 6 6-6",
+    }
     keys = [
         ("DPAD_UP", "Up"),
         ("DPAD_LEFT", "Left"),
@@ -194,7 +228,13 @@ def _card(dev: dict[str, Any], admin: bool = True) -> str:
         ("DPAD_DOWN", "Down"),
     ]
     dpad = "".join(
-        f'<button data-key="{key}" aria-label="{label}" class="{label.lower()}">{label}</button>'
+        f'<button data-key="{key}" aria-label="{label}" class="{label.lower()}">'
+        + (
+            f'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="{arrows[label]}"/></svg>'
+            if label in arrows
+            else label
+        )
+        + "</button>"
         for key, label in keys
     )
     keys = [
@@ -241,22 +281,51 @@ def _card(dev: dict[str, Any], admin: bool = True) -> str:
     )
     if admin and dev.get("type") == "shield":
         setup += '<button data-act="remotepair">Pair fast keys</button>'
+    banner = (
+        '<div class="fastkey-banner" hidden><p>Fast keys are not paired. Pairing shows a code on the TV.</p>'
+        '<div class="row"><button data-act="pairstart">Pair fast keys</button></div>'
+        '<form class="pin-form" hidden><label>Code shown on the TV<input class="pin" autocomplete="off" maxlength="8" inputmode="text"></label>'
+        '<button type="submit">Confirm code</button></form></div>'
+        if admin and dev.get("type") == "shield"
+        else ""
+    )
+    chips = "".join(
+        f'<button type="button" data-chip="{html.escape(c)}">{html.escape(c)}</button>'
+        for c in QUICK_PHRASES
+    )
+    typing = (
+        ""
+        if web
+        else '<div class="sheet"><label for="text-{n}">Type to the TV <span class="text-count">0 / 200</span></label>'
+        '<form class="text-form row"><input id="text-{n}" class="text-entry" maxlength="200" placeholder="Search, password, URL" autocomplete="off" autocapitalize="none" spellcheck="false"><button type="submit" aria-label="Send text">Send</button></form>'
+        f'<div class="chips" aria-label="Quick text">{chips}</div></div>'
+    ).replace("{n}", re.sub(r"[^a-z0-9]", "-", dev["name"].lower()))
     note = (
         '<p class="muted">Volume needs HDMI-CEC on this TV; it may be unavailable.</p>'
         if dev.get("tv_control") == "best-effort"
         else ""
     )
-    return f"""<section class="device" data-dev="{name}" data-type="{html.escape(dev.get("type", ""))}" hidden>
-<div class="device-heading"><div><h1>{name}</h1><p class="connection">Checking connection…</p></div><span class="device-type">{html.escape(dev.get("type", ""))}</span></div>
-{preview}
-<p class="foreground">Looking for the current app…</p><p class="timer-status">Sleep timer · <span class="countdown" role="timer">Off</span></p>
-<div class="row power"><button data-act="power-on">Wake</button><button data-act="power-off" class="danger">Power off</button>{find}</div>
-{inputs}<div class="quick" aria-label="Quick apps"><p class="muted">Loading installed apps…</p></div>
-<div class="remote" aria-label="Remote control"><div class="dpad">{dpad}</div><div class="controls">{controls}</div>{note}</div>
+    badge = (
+        f'<p class="badge muted">{html.escape(BEST_EFFORT_BADGE)}</p>'
+        if dev.get("tv_control") == "best-effort"
+        else ""
+    )
+    msg_id = "msg-" + re.sub(r"[^a-z0-9]", "-", dev["name"].lower())
+    return f"""<section class="device" data-dev="{name}" data-type="{html.escape(dev.get("type", ""))}" data-state="loading" aria-busy="true" hidden>
+<div class="device-heading"><div><h1>{name}</h1><p class="connection">Checking connection…</p><p class="paths muted"></p>{badge}</div><span class="device-type">{html.escape(dev.get("type", ""))}</span></div>
+<p class="offline-note" hidden></p>
+<div class="now" aria-live="polite"><p class="now-label">On now</p><p class="foreground">Looking for the current app…</p></div>
+<div class="notice" role="alert" hidden><p></p><div class="row"><button type="button" class="anyway">Do it anyway</button><button type="button" class="notice-cancel">Cancel</button></div></div>
+{preview}{banner}
+<p class="timer-status">Sleep timer · <span class="countdown" role="timer">Off</span></p>
+<div class="row power"><button data-act="home">Home</button><button data-act="power-on">On</button><button data-act="power-off" class="danger">Power off</button>{find}</div>
+<form class="message-form"><label for="{msg_id}">Send a message to the TV</label><div class="row"><input id="{msg_id}" class="toast" maxlength="200" placeholder="Short message" autocomplete="off"><button type="submit">Send message</button></div></form>
+<details class="history"><summary>Recent messages</summary><ol class="history-list"></ol></details>
+{inputs}<p class="quick-label muted">Open an app</p><div class="quick" aria-label="Open an app"><p class="muted">Loading installed apps…</p></div>
+<div class="remote" aria-label="Remote control"><div class="dpad">{dpad}</div><div class="controls">{controls}</div>{typing}{note}</div>
 <details class="tools"><summary>Apps &amp; tools</summary>
 <details><summary>All apps</summary><label>Search installed apps<input class="app-search" type="search" placeholder="App name or package"></label><div class="app-list"></div><p class="appnote muted"></p><button data-act="refresh">Refresh app list</button></details>
 <details><summary>Sleep timer <span class="timer-detail">15 / 30 / 60 / 90 min</span></summary><div class="timer row">{presets}<button data-act="timer" data-min="0">Cancel timer</button></div></details>
-<label>Message on TV<input class="toast" maxlength="200" placeholder="Write a short message"></label><button data-act="toast">Send message</button>
 {screenshot}{setup}<details><summary>Connection details</summary><pre class="status">Checking…</pre></details><pre class="result" hidden></pre>
 </details></section>"""
 
@@ -283,22 +352,18 @@ async def index(request: Request) -> Response:
     )
 
 
-async def _allowed_apps(body: dict[str, Any]) -> dict[str, Any]:
-    denied = [d for d in await load_denied_apps() if d]
+def _allowed_apps(body: dict[str, Any]) -> dict[str, Any]:
     return {
         **body,
         "apps": [
             app
             for app in body.get("apps", [])
-            if not any(
-                d
-                in (
-                    str(app.get("id", ""))
-                    + str(app.get("title", ""))
-                    + str(app.get("label", ""))
-                ).lower()
-                for d in denied
-            )
+            if "netflix"
+            not in (
+                str(app.get("id", ""))
+                + str(app.get("title", ""))
+                + str(app.get("label", ""))
+            ).lower()
         ],
     }
 
@@ -316,18 +381,20 @@ async def api_get(request: Request) -> Response:
         return JSONResponse(await tools.do_status(name))
     if what == "health":
         return JSONResponse(await tools.do_health(name))
+    if what == "whatison":
+        return JSONResponse(await tools.do_what_is_on(name))
     if what == "apps":
         return JSONResponse(
-            await _allowed_apps(
-                await tools.do_list_apps(name, refresh, background=True)
-            )
+            _allowed_apps(await tools.do_list_apps(name, refresh, background=True))
         )
     if what == "inputs":
         return JSONResponse(await tools.do_list_inputs(name, refresh, background=True))
     if what == "quickapps":
-        return JSONResponse(await _allowed_apps(await tools.do_quick_apps(name)))
+        return JSONResponse(_allowed_apps(await tools.do_quick_apps(name)))
     if what == "sleeptimer":
         return JSONResponse(await tools.do_sleep_timer(name))
+    if what == "messages":
+        return JSONResponse({"device": name, "messages": messages.history(name)})
     if what in {"preview", "screenshot"}:
         dev = next(
             (d for d in await _visible_devices(request) if d["name"] == name), None
@@ -404,6 +471,14 @@ async def _api_post(request: Request, what: str, name: str) -> Response:
     limited = _rate_limited(what, name, data)
     if limited:
         return limited
+    if what in IN_USE_CHECKED and data.get("force") is not True:
+        refusal = await tools.in_use_refusal(name, False)
+        if refusal:
+            return JSONResponse(refusal)
+    if what == "home":
+        return JSONResponse(await tools.do_go_home(name))
+    if what == "open":
+        return JSONResponse(await tools.do_open_app(name, str(data.get("app", ""))))
     if what == "wake":
         return JSONResponse(await tools.do_wake(name))
     if what == "key":
@@ -411,7 +486,11 @@ async def _api_post(request: Request, what: str, name: str) -> Response:
     if what == "launch":
         return JSONResponse(await tools.do_launch(name, str(data.get("app", ""))))
     if what == "toast":
-        return JSONResponse(await tools.do_toast(name, str(data.get("message", ""))))
+        return JSONResponse(
+            await tools.do_toast(
+                name, str(data.get("message", "")), actor=_user(request) or ""
+            )
+        )
     if what == "sleeptimer":
         try:
             minutes = int(data.get("minutes", -1))
@@ -427,6 +506,8 @@ async def _api_post(request: Request, what: str, name: str) -> Response:
     if what == "remotepair":
         code = str(data.get("code", ""))
         return JSONResponse(await tools.do_remote_pair(name, code))
+    if what == "text":
+        return JSONResponse(await tools.do_text(name, str(data.get("text", ""))))
     if what == "reboot":
         return JSONResponse(await tools.do_reboot(name))
     if what == "pair":
@@ -484,7 +565,54 @@ def _fill(template: str) -> str:
     )
 
 
-PAGE = _fill((STATIC / "panel.html").read_text())
+# Written by the Dockerfile at image build; absent on a local run.
+BUILD_DATE_FILE = Path(__file__).parent / "BUILD_DATE"
+ISO_RE = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:Z|[+-]\d\d:\d\d)")
+
+
+def _iso_or_unknown(value: str) -> str:
+    value = value.strip()
+    return value if ISO_RE.fullmatch(value) else "unknown"
+
+
+def build_info() -> dict[str, str]:
+    sha = os.environ.get("TV_CONTROL_GIT_SHA") or ""
+    try:
+        built = BUILD_DATE_FILE.read_text()
+    except OSError:
+        built = ""
+    return {
+        "version": os.environ.get("TV_CONTROL_VERSION") or "unknown",
+        "commit": sha if re.fullmatch(r"[0-9a-f]{7,40}", sha) else "unknown",
+        "commit_date": _iso_or_unknown(os.environ.get("TV_CONTROL_GIT_DATE") or ""),
+        "build_date": _iso_or_unknown(built),
+    }
+
+
+def _when(value: str) -> str:
+    if value == "unknown":
+        return value
+    day, clock = value.split("T")
+    zone = "UTC" if clock.endswith("Z") else clock[8:]
+    return f"{day} {clock[:5]} {zone}"
+
+
+def _build_footer() -> str:
+    info = build_info()
+    version = html.escape(info["version"])
+    sha = info["commit"]
+    commit = (
+        "commit unknown"
+        if sha == "unknown"
+        else f'commit <a href="{COMMIT_URL}{sha}" target="_blank" rel="noopener">{sha[:7]}</a>'
+    )
+    return (
+        f"tv-control v{version} · {commit} · committed {_when(info['commit_date'])}"
+        f" · built {_when(info['build_date'])}"
+    )
+
+
+PAGE = _fill((STATIC / "panel.html").read_text()).replace("{{BUILD}}", _build_footer())
 MANIFEST = _fill((STATIC / "manifest.webmanifest").read_text())
 JS = (STATIC / "panel.js").read_text()
 
@@ -508,6 +636,13 @@ async def manifest(request: Request) -> Response:
         media_type="application/manifest+json",
         headers={"Cache-Control": "no-cache"},
     )
+
+
+async def version(request: Request) -> Response:
+    denied = _deny(request, post=False)
+    if denied:
+        return denied
+    return JSONResponse(build_info(), headers={"Cache-Control": "no-store"})
 
 
 async def _device_status(name: str) -> dict[str, Any]:
@@ -555,6 +690,7 @@ ROUTES = [
     Route("/events", events),
     Route("/manifest.webmanifest", manifest),
     Route("/static/{asset}", static_asset),
+    Route("/api/version", version, methods=["GET"]),
     Route("/api/{what}/{name}", api_get, methods=["GET"]),
     Route("/api/{what}/{name}", api_post, methods=["POST"]),
 ]
