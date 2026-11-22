@@ -10,9 +10,12 @@ name: CI
 permissions:
   contents: read
 
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test:
@@ -49,20 +52,51 @@ jobs:
           uv run --locked playwright install chromium
           uv run --locked pytest -q -m e2e --no-cov
 
-  image:
-    name: Build and push to GHCR
+  release:
+    name: Release
     needs: test
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+    uses: bakerboy448/.github/.github/workflows/release-calver.yml@625cd5467e2b71e44d10f06697535abca356f842
+    with:
+      sha: ${{ github.sha }}
+
+  image:
+    name: Build and push to GHCR
+    needs: release
+    if: github.event_name == 'push' && needs.release.result == 'success'
     runs-on: [self-hosted, Linux, X64, hetzner]
     timeout-minutes: 20
     permissions:
       contents: read
       packages: write
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      digest: ${{ steps.build.outputs.digest }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
+          fetch-tags: true
           persist-credentials: false
+
+      - name: Read the calver tag and commit date
+        id: version
+        run: |
+          set -euo pipefail
+          git fetch --tags --force origin
+          tag="$(git tag --points-at "$GITHUB_SHA" --sort=-v:refname \
+            | grep -E '^[0-9]{4}\.[0-9]{2}\.[0-9]{2}(\.[0-9]+)?$' | head -n1 || true)"
+          if [ -z "$tag" ]; then
+            echo "::error::No calver tag points at $GITHUB_SHA; a newer release superseded it."
+            exit 1
+          fi
+          {
+            echo "tag=$tag"
+            echo "date=$(git show -s --format=%cI "$GITHUB_SHA")"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
@@ -78,28 +112,74 @@ jobs:
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
-          images: ghcr.io/${{ github.repository }}
+          images: ${{ env.IMAGE }}
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=${{ steps.version.outputs.tag }}
+            type=raw,value=latest
             type=sha,format=short
 
       - name: Build and push
+        id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            TV_CONTROL_VERSION=${{ steps.version.outputs.tag }}
+            TV_CONTROL_GIT_SHA=${{ github.sha }}
+            TV_CONTROL_GIT_DATE=${{ steps.version.outputs.date }}
 
-  release:
-    name: Release
-    needs: [test, image]
-    if: >-
-      github.event_name == 'push' && !cancelled() &&
-      needs.test.result == 'success' &&
-      needs.image.result == 'success'
-    permissions:
-      contents: write
-    uses: bakerboy448/.github/.github/workflows/release-calver.yml@625cd5467e2b71e44d10f06697535abca356f842
-    with:
-      sha: ${{ github.sha }}
+  bump-deploy-repo:
+    name: Open a pin PR in the deploy repo
+    needs: image
+    # Off until the repo variables DOCKERGIT_BUMP_ENABLED=true, DOCKERGIT_BUMP_REPO (owner/name),
+    # DOCKERGIT_BUMP_BASE (branch), and DOCKERGIT_BUMP_FILE (compose path), and the secret
+    # DOCKERGIT_BUMP_TOKEN (contents and pull-requests write on that repo) exist.
+    if: github.event_name == 'push' && vars.DOCKERGIT_BUMP_ENABLED == 'true'
+    runs-on: [self-hosted, Linux, X64, hetzner]
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ secrets.DOCKERGIT_BUMP_TOKEN }}
+      TAG: ${{ needs.image.outputs.tag }}
+      DIGEST: ${{ needs.image.outputs.digest }}
+      TARGET_REPO: ${{ vars.DOCKERGIT_BUMP_REPO }}
+      TARGET_BASE: ${{ vars.DOCKERGIT_BUMP_BASE }}
+      TARGET_FILE: ${{ vars.DOCKERGIT_BUMP_FILE }}
+    steps:
+      - name: Checkout the deploy repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ vars.DOCKERGIT_BUMP_REPO }}
+          ref: ${{ vars.DOCKERGIT_BUMP_BASE }}
+          token: ${{ secrets.DOCKERGIT_BUMP_TOKEN }}
+          path: deploy
+
+      - name: Pin the new digest and open the PR
+        working-directory: deploy
+        run: |
+          set -euo pipefail
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::bad digest '$DIGEST'"; exit 1; }
+          image_re="${IMAGE//./\\.}"
+          pattern="^( +image: )${image_re}:[^@ ]+@sha256:[0-9a-f]{64}$"
+          count="$(grep -cE "$pattern" "$TARGET_FILE" || true)"
+          if [ "$count" != 1 ]; then
+            echo "::error::expected 1 pinned ${IMAGE} line in $TARGET_FILE, found $count"
+            exit 1
+          fi
+          sed -E -i "s#${pattern}#\\1${IMAGE}:${TAG}@${DIGEST}#" "$TARGET_FILE"
+          if git diff --quiet; then
+            echo "Already pinned to ${TAG}@${DIGEST}"
+            exit 0
+          fi
+          branch="tv-control/${TAG}"
+          git switch -c "$branch"
+          git -c user.name='github-actions[bot]' \
+            -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit -am "chore(tv-control): pin image ${TAG}" \
+            -m "Source: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}"
+          git push origin "$branch"
+          gh pr create -R "$TARGET_REPO" --base "$TARGET_BASE" --head "$branch" \
+            --title "chore(tv-control): pin image ${TAG}" \
+            --body "Pins \`${IMAGE}:${TAG}@${DIGEST}\` from ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/${TAG}."
