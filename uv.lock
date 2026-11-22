@@ -174,16 +174,16 @@ wheels = [
 
 [[package]]
 name = "androidtvremote2"
-version = "0.3.2"
+version = "0.3.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiofiles" },
     { name = "cryptography" },
     { name = "protobuf" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/88/ba/25b1cd1071bb57fb18c86856a578d100e748cd6344a4d7224994dfe45df0/androidtvremote2-0.3.2.tar.gz", hash = "sha256:68fa96ca25ac8ddcb20a64c4c61481a37539b301b899f733f3fb1fc134ea8763", size = 58353, upload-time = "2026-09-01T15:54:52.7Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/7d/26/48b1fb7657dffceb344bd02c3b8a72ed466e8a090f02dedd0b84a938fcc6/androidtvremote2-0.3.3.tar.gz", hash = "sha256:f7622dd7a990ffcf6a2ded488cd4446975c70cb1b6ccc62f8f4d921929b01c65", size = 60235, upload-time = "2026-11-08T10:28:52.962Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/42/3f/3abd350acc7a442157e45881243f8c175dbd277f0d26b25516bce476d770/androidtvremote2-0.3.2-py3-none-any.whl", hash = "sha256:b3818c316d8416912f46aac489dbd2bc277814a72b6fb1c4c45c71b6424fc13c", size = 48077, upload-time = "2026-09-01T15:54:51.59Z" },
+    { url = "https://files.pythonhosted.org/packages/c4/21/cae0b37ddb541ba7c5013da5a93a93be2b37a532761a99550cb41f83bf1a/androidtvremote2-0.3.3-py3-none-any.whl", hash = "sha256:0c953122b4f56ff84646d619fd2ab0ce488d5452497a5e8d072dca906ff4327d", size = 48234, upload-time = "2026-11-08T10:28:51.468Z" },
 ]
 
 [[package]]
@@ -1800,7 +1800,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aiowebostv", specifier = "==0.10.0" },
-    { name = "androidtvremote2", specifier = ">=0.3.2" },
+    { name = "androidtvremote2", specifier = ">=0.3.3" },
     { name = "apkutils", specifier = "==4.0.0" },
     { name = "mcp", specifier = "==2.3.0" },
     { name = "pillow" },
