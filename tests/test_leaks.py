@@ -24,10 +24,10 @@ PRIVATE = [
     )
 ]
 WORDS = [
-    re.compile("baker" + "flix", re.I),
+    re.compile("baker" + "flix", re.IGNORECASE),
     re.compile(re.escape("/opt/" + "dockergit")),
-    re.compile(r"\b[a-z0-9-]+\.inter" + r"nal\b", re.I),
-    re.compile(r"\btail[0-9a-f]{4,}\.ts\.net\b", re.I),
+    re.compile(r"\b[a-z0-9-]+\.inter" + r"nal\b", re.IGNORECASE),
+    re.compile(r"\btail[0-9a-f]{4,}\.ts\.net\b", re.IGNORECASE),
 ]
 
 

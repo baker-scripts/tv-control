@@ -2,14 +2,15 @@
 
 import asyncio
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
+
+import pytest
+from androidtvremote2 import CannotConnect
 
 import adbops
 import inventory
-import pytest
 import tools
 import tvremote
-from androidtvremote2 import CannotConnect
 from inventory import DeviceError
 
 SHIELD = {"name": "shield-a", "type": "shield", "ip": "192.0.2.1", "port": 5555}
@@ -21,7 +22,7 @@ def run(coro: Any) -> Any:
 
 
 class FakeRemote:
-    instances: list["FakeRemote"] = []
+    instances: ClassVar[list["FakeRemote"]] = []
     fail_connect = False
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:

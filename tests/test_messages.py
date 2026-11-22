@@ -3,9 +3,10 @@
 from pathlib import Path
 from typing import Any
 
-import messages
 import pytest
 from conftest import read_policy
+
+import messages
 from inventory import DeviceError
 
 GRANDPARENTS = {"name": "b-shield", "type": "shield", "household": "grandparents"}

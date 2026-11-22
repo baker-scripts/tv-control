@@ -25,16 +25,17 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
-import panel
-import tools
 import uvicorn
-from inventory import run
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
+
+import panel
+import tools
+from inventory import run
 from tools import mcp
 
 TS_IP = os.environ.get("TS_IP", "")

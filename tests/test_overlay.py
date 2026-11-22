@@ -4,10 +4,11 @@ import asyncio
 import json
 from typing import Any
 
-import adbops
 import pytest
-from inventory import DeviceError
 from test_adbops import SHIELD, FakeAdb, ok
+
+import adbops
+from inventory import DeviceError
 
 PKG = adbops.OVERLAY_PKG
 

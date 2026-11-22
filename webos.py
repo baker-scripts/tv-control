@@ -11,6 +11,7 @@ from typing import Any, cast
 
 import aiohttp
 from aiowebostv import WebOsClient
+
 from inventory import DeviceError, load_sites, run
 
 WEBOS_KEYS_FILE = Path(os.environ.get("WEBOS_KEYS_FILE", "/config/webos-keys.json"))

@@ -9,9 +9,10 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
 
+import pytest
+
 import app
 import inventory
-import pytest
 import scan
 from inventory import DeviceError
 

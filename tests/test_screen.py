@@ -3,11 +3,12 @@
 import asyncio
 from typing import Any
 
-import adbops
 import pytest
-import tools
 from test_adbops import SHIELD, ok
 from test_adbops import install as install_adb
+
+import adbops
+import tools
 
 RESUMED = "    mResumedActivity: ActivityRecord{e56 u0 com.plexapp.android/tv.plex.app.MainActivity t47}\n"
 WINDOW = "  mCurrentFocus=Window{85a u0 com.plexapp.android/tv.plex.app.MainActivity}\n"

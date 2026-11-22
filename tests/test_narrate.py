@@ -4,14 +4,15 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
+import pytest
+from conftest import read_policy
+from test_navigation import MID, PLEX, Screen
+from test_navigation import screen as screen  # noqa: PLC0414
+
 import adbops
 import messages
-import pytest
 import tools
-from conftest import read_policy
 from inventory import DeviceError
-from test_navigation import MID, PLEX, Screen
-from test_navigation import screen as screen  # noqa: F401  (fixture)
 
 FIRE = {
     "name": "fire-a",
@@ -28,7 +29,7 @@ def go(coro: Any) -> Any:
 @pytest.fixture
 def shown(
     monkeypatch: pytest.MonkeyPatch,
-    screen: Screen,  # noqa: F811
+    screen: Screen,
     policy: dict[str, Any],
     tmp_path: Path,
 ) -> list[str]:
@@ -104,7 +105,7 @@ def test_narrate_refuses_empty_steps(shown: list[str]) -> None:
 
 def test_open_app_narrates_before_acting_with_shield_button_words(
     shown: list[str],
-    screen: Screen,  # noqa: F811
+    screen: Screen,
 ) -> None:
     body = go(tools.do_open_app("shield-a", PLEX, narrate=True))
     assert body["confirmed"] is True
@@ -139,7 +140,7 @@ def test_play_title_narrates(shown: list[str]) -> None:
 
 def test_failed_narration_skips_the_action(
     shown: list[str],
-    screen: Screen,  # noqa: F811
+    screen: Screen,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def fail(dev: dict[str, Any], message: str, **_: Any) -> dict[str, Any]:
@@ -170,7 +171,7 @@ def test_grandparents_household_gets_every_step_then_an_end_message(
 
 def test_other_households_get_one_start_and_one_end_message_without_button_words(
     shown: list[str],
-    screen: Screen,  # noqa: F811
+    screen: Screen,
 ) -> None:
     body = go(tools.do_open_app("family-shield", PLEX, narrate=True))
     assert body["confirmed"] is True and body["narration_mode"] == "start_end"
@@ -181,7 +182,7 @@ def test_other_households_get_one_start_and_one_end_message_without_button_words
 
 def test_the_end_message_follows_a_confirmed_action_only(
     shown: list[str],
-    screen: Screen,  # noqa: F811
+    screen: Screen,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(tools, "PLAY_TIMEOUT_S", 0)

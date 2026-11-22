@@ -4,11 +4,12 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
+import pytest
+from conftest import read_policy
+
 import adbops
 import messages
-import pytest
 import tools
-from conftest import read_policy
 from inventory import DeviceError
 
 SHIELD = {

@@ -5,10 +5,11 @@ import contextlib
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 import adbops
 import appcache
 import inventory
-import pytest
 import sleeptimer
 import tools
 import webos
