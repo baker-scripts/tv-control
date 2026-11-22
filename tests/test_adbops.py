@@ -7,11 +7,12 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+from PIL import Image
+
 import adbops
 import appcache
-import pytest
 from inventory import DeviceError
-from PIL import Image
 
 SHIELD = {"name": "shield-a", "type": "shield", "ip": "192.0.2.1", "port": 5555}
 FIRE = {

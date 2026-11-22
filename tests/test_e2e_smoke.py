@@ -11,12 +11,13 @@ from collections.abc import Iterator
 from typing import Any
 from unittest.mock import AsyncMock
 
-import panel
 import pytest
 import uvicorn
 from playwright.sync_api import Browser, sync_playwright
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
+
+import panel
 
 pytestmark = pytest.mark.e2e
 

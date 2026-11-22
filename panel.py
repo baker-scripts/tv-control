@@ -23,10 +23,6 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
-import messages
-import scan
-import tools
-from inventory import DeviceError, load_devices
 from starlette.datastructures import MutableHeaders
 from starlette.requests import Request
 from starlette.responses import (
@@ -36,6 +32,11 @@ from starlette.responses import (
     StreamingResponse,
 )
 from starlette.routing import Route
+
+import messages
+import scan
+import tools
+from inventory import DeviceError, load_devices
 
 CSRF_HEADER = "x-tv-panel"
 USER_HEADER = "x-authentik-username"
@@ -456,18 +457,18 @@ async def _api_post(request: Request, what: str, name: str) -> Response:
     if denied:
         return denied
     data = await _body(request)
-    if (what == "power" and data.get("state") == "off") or (
+    needs_confirm = (what == "power" and data.get("state") == "off") or (
         what == "key"
         and str(data.get("key", "")).strip().upper().removeprefix("KEYCODE_") == "SLEEP"
-    ):
-        if data.get("confirm") != name:
-            return JSONResponse(
-                {
-                    "error": "Power-off confirmation required",
-                    "next_step": "Confirm power off for this device.",
-                },
-                400,
-            )
+    )
+    if needs_confirm and data.get("confirm") != name:
+        return JSONResponse(
+            {
+                "error": "Power-off confirmation required",
+                "next_step": "Confirm power off for this device.",
+            },
+            400,
+        )
     limited = _rate_limited(what, name, data)
     if limited:
         return limited

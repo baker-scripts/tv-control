@@ -3,8 +3,9 @@
 import asyncio
 from typing import Any
 
-import adbops
 import pytest
+
+import adbops
 import tools
 from inventory import DeviceError
 

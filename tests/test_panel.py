@@ -10,13 +10,14 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
 
-import app
 import httpx2
-import panel
 import pytest
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.requests import Request
+
+import app
+import panel
 
 PROXY_KEY = "test-proxy-key"
 DEVICES = [

@@ -18,9 +18,10 @@ from pathlib import Path
 from typing import Any, cast
 from urllib.parse import quote
 
+from PIL import Image as PILImage
+
 import appcache
 from inventory import DeviceError, run
-from PIL import Image as PILImage
 
 ADB_TIMEOUT_S = 20
 # A device that answered get-state "device" is trusted this long; the next command skips the probe.

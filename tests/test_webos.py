@@ -3,11 +3,12 @@
 import asyncio
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, ClassVar
 from unittest.mock import AsyncMock
 
 import aiohttp
 import pytest
+
 import tools
 import webos
 from inventory import DeviceError
@@ -16,7 +17,7 @@ DEV = {"name": "lg-a", "type": "webos", "ip": "192.0.2.2", "site": "home"}
 
 
 class FakeTv:
-    instances: list["FakeTv"] = []
+    instances: ClassVar[list["FakeTv"]] = []
     fail: type[BaseException] | None = None
 
     def __init__(self, ip: str, key: str | None) -> None:

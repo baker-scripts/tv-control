@@ -13,6 +13,10 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, cast
 
+from mcp.server import MCPServer
+from mcp.server.mcpserver import Image
+from PIL import Image as PillowImage
+
 import adbops
 import appcache
 import messages
@@ -34,9 +38,6 @@ from inventory import (
     require_capability,
     run,
 )
-from mcp.server import MCPServer
-from mcp.server.mcpserver import Image
-from PIL import Image as PillowImage
 
 SCRIPTS_DIR = Path(os.environ.get("SCRIPTS_DIR", "/scripts"))
 SCRIPT_TIMEOUT_S = 900

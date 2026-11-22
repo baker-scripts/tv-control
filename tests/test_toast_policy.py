@@ -4,9 +4,10 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 import adbops
 import messages
-import pytest
 import tools
 import webos
 from inventory import DeviceError

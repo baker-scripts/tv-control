@@ -19,6 +19,7 @@ from androidtvremote2 import (
     ConnectionClosed,
     InvalidAuth,
 )
+
 from inventory import DeviceError
 
 REMOTE_DIR = Path(os.environ.get("REMOTE_DIR", "/config/remote"))
