@@ -181,6 +181,22 @@ def test_play_title_builds_the_deep_link_and_waits_for_playback(screen: Screen) 
     assert body["playing"] is True and body["title"] == "The Matrix"
 
 
+def test_play_title_carries_a_view_offset_in_the_deep_link(screen: Screen) -> None:
+    body = go(tools.do_play_title("shield-a", MID, "12345", view_offset_ms=1825000))
+    uri = (
+        f"plex://server://{MID}/com.plexapp.plugins.library/library/metadata/12345"
+        "?viewOffset=1825000&autoPlay=1"
+    )
+    assert screen.calls[:2] == ["screen", f"view {uri} {PLEX}"]
+    assert body["playing"] is True
+
+
+@pytest.mark.parametrize("offset", [-1, 24 * 3600 * 1000 + 1, 1.5, "1000", True])
+def test_play_title_refuses_a_bad_view_offset(screen: Screen, offset: Any) -> None:
+    body = go(tools.do_play_title("shield-a", MID, "12345", view_offset_ms=offset))
+    assert "view_offset_ms" in body["error"] and screen.calls == []
+
+
 def test_play_title_errors_when_playback_never_starts(
     screen: Screen, monkeypatch: pytest.MonkeyPatch
 ) -> None:

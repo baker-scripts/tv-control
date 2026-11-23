@@ -352,6 +352,7 @@ CONFIRM_POLL_S = 1.0
 PLEX_PKG = "com.plexapp.android"
 PLEX_MACHINE_ID_RE = re.compile(r"^[A-Za-z0-9]{8,64}$")
 PLEX_RATING_KEY_RE = re.compile(r"^[0-9]{1,12}$")
+MAX_VIEW_OFFSET_MS = 24 * 3600 * 1000
 
 
 END_LINE = "All done."
@@ -794,24 +795,33 @@ async def screen_guard(
     return body if "error" in body else None
 
 
-def plex_deep_link(machine_id: str, rating_key: str) -> str:
+def plex_deep_link(machine_id: str, rating_key: str, view_offset_ms: int = 0) -> str:
     if not PLEX_MACHINE_ID_RE.match(machine_id):
         raise DeviceError("machine_id must be the Plex server machineIdentifier")
     if not PLEX_RATING_KEY_RE.match(rating_key):
         raise DeviceError("rating_key must be the numeric Plex ratingKey")
+    if type(view_offset_ms) is not int or not 0 <= view_offset_ms <= MAX_VIEW_OFFSET_MS:
+        raise DeviceError(
+            "view_offset_ms must be whole milliseconds from 0 to 24 hours"
+        )
+    offset = f"viewOffset={view_offset_ms}&" if view_offset_ms else ""
     return (
         f"plex://server://{machine_id}/com.plexapp.plugins.library/library/metadata/"
-        f"{rating_key}?autoPlay=1"
+        f"{rating_key}?{offset}autoPlay=1"
     )
 
 
 async def do_play_title(
-    device: str, machine_id: str, rating_key: str, narrate: bool = False
+    device: str,
+    machine_id: str,
+    rating_key: str,
+    narrate: bool = False,
+    view_offset_ms: int = 0,
 ) -> dict[str, Any]:
     """Open a Plex title by deep link with autoPlay, then wait for Plex's media session to play."""
 
     async def act(dev: dict[str, Any]) -> dict[str, Any]:
-        uri = plex_deep_link(machine_id, rating_key)
+        uri = plex_deep_link(machine_id, rating_key, view_offset_ms)
         _require_adb(dev, "play_title")
         check_app_allowed(PLEX_PKG, await load_denied_apps())
         woke = await _wake_first(dev)
@@ -1533,10 +1543,11 @@ async def play_title(
     rating_key: str,
     narrate: bool = False,
     force: bool = False,
+    view_offset_ms: int = 0,
 ) -> dict[str, Any]:
-    """Play a Plex title by deep link (server machineIdentifier and ratingKey); confirms Plex's media session plays. narrate=true shows the steps first."""
+    """Play a Plex title by deep link (server machineIdentifier and ratingKey); confirms Plex's media session plays. view_offset_ms starts it at that point (0 keeps Plex's own choice). narrate=true shows the steps first."""
     return await in_use_refusal(device, force) or await do_play_title(
-        device, machine_id, rating_key, narrate
+        device, machine_id, rating_key, narrate, view_offset_ms
     )
 
 
