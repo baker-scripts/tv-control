@@ -4,10 +4,12 @@
 # capabilities gates verbs: find_remote, wake, power, inputs, sleep_timer.
 # tv_control: best-effort marks a device whose TV has no confirmed HDMI-CEC.
 # paired_tv names the TV a Shield feeds; health reports it as standby unless the Shield plays.
-# input_ids (Fire TV only): input key -> Android TvInputInfo id, read from `dumpsys tv_input`.
-#   set_input refuses an input with no id. The switch is a passthrough intent and does not wake the TV.
-# input_keys (Fire TV only): input key -> Android keyevent name; tried before input_ids, for TVs whose
-#   passthrough intent opens the wrong screen.
+# Inputs are read from the TV (list_inputs). Every input key below is optional and only adds names:
+# inputs: input key -> button label. A key the TV does not list is shown with an error and refused.
+# input_ids (Fire TV only): input key -> Android TvInputInfo id, pinning which listed input a key means.
+# input_keys (Fire TV only): input key -> Android keyevent name, used instead of the passthrough intent
+#   for TVs whose passthrough intent opens the wrong screen. Neither wakes the TV.
+# input_aliases: spoken name -> input id or another name ("cable box": HDMI_2).
 # tailnet_ip: a second address tried after ip and before tailnet_fqdn.
 # household: groups TVs for the message policy (messages.narration.households, assistant replies).
 # narration: every_step | start_end | off; overrides the household's narration depth for one device.
@@ -37,6 +39,8 @@ devices:
     inputs:
       HDMI_1: Shield
       HDMI_2: Console
+    input_aliases:
+      game box: HDMI_2
   - name: cabin-firetv
     site: cabin
     ip: 198.51.100.40
@@ -58,7 +62,7 @@ devices:
       hdmi1: Shield
       hdmi2: Console
     input_keys:
-      hdmi2: KEYCODE_TV_INPUT_HDMI_2
+      hdmi2: TV_INPUT_HDMI_2
     input_ids:
       hdmi1: com.example.tvinput/.HdmiInputService/HW2
   - name: guest-room-shield

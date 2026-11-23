@@ -8,7 +8,8 @@ A web panel and MCP server for a small fleet of TVs: NVIDIA Shields and Fire TVs
 - Fast keys on Shields: after a one-time pairing, keys go over the Android TV Remote v2 protocol ([androidtvremote2](https://github.com/tronikos/androidtvremote2)) in milliseconds instead of about 1 s per `adb shell input`. Unpaired Shields and any Remote v2 failure fall back to ADB.
 - Live status over Server-Sent Events (`/events`, one update per device every 10 s), so cards refresh without polling.
 - Installable PWA: web manifest and icons, content-hashed static assets served `immutable`.
-- Power, wake (WoL through an SSH relay on the TV's LAN), input switching, and sleep timers. LG webOS inputs switch through aiowebostv; Fire TV inputs switch through a passthrough intent (needs `input_ids`, does not wake the TV).
+- Power, wake (WoL through an SSH relay on the TV's LAN), input switching, and sleep timers. Inputs are read from the TV itself and named the way people say them (see "Inputs"). LG webOS inputs switch through aiowebostv; Fire TV inputs switch through a passthrough intent or a configured keyevent (does not wake the TV).
+- `capabilities` reports what a device can do now, and `tv_action` is one write verb for open app, switch input, play title, wake, sleep, and volume, with a `shadow` dry run (see "One write verb and capabilities").
 - Shield "find my remote" (locator), device status, screenshots, and an admin screen preview.
 - Health checks, including paired TVs: a Shield with `paired_tv` reports `standby` when its TV is off, and a fault only when the TV is unreachable while the Shield is awake and playing.
 - Site LAN scan for new ADB or webOS devices, with an admin approve step.
@@ -75,9 +76,10 @@ See [`devices.example.yml`](devices.example.yml). Keep the real file outside thi
 | `devices[].volume_via` | Name of a webOS TV that takes this device's volume and mute keys. |
 | `devices[].capabilities` | Any of `find_remote`, `wake`, `power`, `inputs`, `sleep_timer`. |
 | `devices[].label`, `mac`, `tv_control`, `status` | Display name, WoL MAC, `best-effort` CEC, `pending` (skipped until it has an address). |
-| `devices[].inputs` | Input key to button label, for example `HDMI_1: Shield`. |
-| `devices[].input_keys` | Fire TV only: input key to an Android keyevent name, tried before `input_ids`. |
-| `devices[].input_ids` | Fire TV only: input key to the Android TvInputInfo id (from `adb shell dumpsys tv_input`). An input without an id is shown as unavailable. |
+| `devices[].inputs` | Optional input key to button label, for example `HDMI_1: Shield`. The key and label become names for the input the device lists; a key the device does not list is shown with an error and refused. |
+| `devices[].input_keys` | Fire TV only, optional: input key to an Android keyevent name (`TV_INPUT_HDMI_1`), used instead of the passthrough intent. |
+| `devices[].input_ids` | Fire TV only, optional: input key to the Android TvInputInfo id, pinning which listed input the key means. |
+| `devices[].input_aliases` | Optional spoken name to an input id or another name, for example `cable box: HDMI_3`. |
 | `devices[].plex_player` | Optional Plex player name for this device. A Plex session matches when its player equals the device `name`, `label`, `plex_player`, or Android device name (case and punctuation ignored). |
 | `devices[].paired_tv` | The device name of the TV a Shield feeds; drives the paired-TV health status, and an agent's input switch or launch on that TV is refused while the device plays or is open in an app. |
 | `devices[].allowed_apps` | Optional list of package (or webOS app) ids. When present, automation opens only these ids on the device; an empty list opens nothing. Absent keeps every installed app. |
@@ -128,6 +130,24 @@ curl -sS -X POST "http://<TS_IP>:8012/message" -H "Authorization: Bearer $TV_CON
 | `narrate` | Shows the intro, then each `|`-separated step, 6 s apart, at the device's narration depth. |
 
 The in-use refusal skips a Shield whose app in front was confirmed by `open_app` or `go_home` in the last 120 s while nothing plays, so a multi-step flow runs without `force`.
+
+## Inputs
+
+No input list lives in code or config. `list_inputs`, `set_input`, and `tv_action switch_input` read the device:
+
+| Platform | Source | Names per input |
+| --- | --- | --- |
+| LG webOS | ssap `tv/getExternalInputList` (aiowebostv `get_inputs`) | label, `HDMI <port>`, the HDMI-CEC device name, the set-top brand |
+| Fire OS TV (Android TV) | `dumpsys tv_input`: TvInputInfo ids, TvInputHardwareInfo `hdmi_port`, HDMI-CEC devices | `HDMI <port>`, the HDMI-CEC device name |
+| Shield, Fire TV Stick | none: a streaming device has no inputs; switch its `paired_tv` | - |
+
+A name is casefolded with punctuation and spaces dropped, then matched in this order: exact id or configured key, an `input_aliases` entry, then any name. An unlisted name is refused with `unknown_input`, a name that fits several inputs with `ambiguous_input`, both with `candidates`. The `inputs` capability, or any input key in `devices.yml`, allows input verbs on a device.
+
+## One write verb and capabilities
+
+`tv_action {device, action, target}` covers `open_app` (app name or id), `switch_input` (input name), `play_title` (`machine_id:rating_key[:view_offset_ms]`), `wake`, `sleep` (standby), and `volume` (`up`, `down`, `mute`). It and every other write verb pass `write_gate` first: the app policy, then the in-use refusal. `shadow=true` returns the resolved plan (app id, input id and route, deep link, key) and writes nothing. The single verbs (`launch_app`, `set_input`, `wake`, `power`, ...) stay and take the same gate.
+
+`capabilities {device}` is read-only. It reports each verb as `ok` or with the reason it is refused, each `tv_action` action, the apps automation may open (from the app cache, cut by the app policy), the inputs the device lists, and the volume path (`webos`, `webos:<tv>` through `volume_via`, or HDMI-CEC key events). It derives from the device type and live reads; `devices.yml` can only remove (`capabilities:`, `tv_control: best-effort`, `allowed_apps`, `denied_apps`), never add.
 
 ## App names and policy
 

@@ -319,7 +319,7 @@ def test_configured_inputs_override_labels_and_flag_unknown(
     assert "Unknown configured input" in body["inputs"][1]["error"]
 
 
-def test_fire_configured_input_is_visible_but_never_guessed(
+def test_fire_configured_input_the_device_does_not_list_is_refused(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from unittest.mock import AsyncMock
@@ -335,10 +335,11 @@ def test_fire_configured_input_is_visible_but_never_guessed(
             }
         ),
     )
+    monkeypatch.setattr(adbops, "list_inputs", AsyncMock(return_value=[]))
     body = run(tools.do_list_inputs("fire"))
     assert body["inputs"][0]["label"] == "Shield"
-    assert "not verified" in body["inputs"][0]["error"]
-    assert "unsupported_on_device" in run(tools.do_set_input("fire", "hdmi1"))["error"]
+    assert "does not list it" in body["inputs"][0]["error"]
+    assert "no_inputs" in run(tools.do_set_input("fire", "hdmi1"))["error"]
 
 
 def test_foreground_uses_cached_label(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -704,6 +705,12 @@ def test_playback_and_wakefulness_parsers() -> None:
     assert not adbops.is_awake("  mWakefulness=Asleep")
 
 
+TV_INPUT_DUMP = """\
+    com.example.tv/.Hdmi/HW5: info: TvInputInfo{id=com.example.tv/.Hdmi/HW5, pkg=com.example.tv, service=com.example.tv.Hdmi}; state: 0
+    TvInputHardwareInfo {id=5, type=9, audio_type=0, audio_addr=, hdmi_port=1, cable_connection_status=1}
+"""
+
+
 def test_firetv_set_input_uses_passthrough_uri(monkeypatch: pytest.MonkeyPatch) -> None:
     from unittest.mock import AsyncMock
 
@@ -721,6 +728,8 @@ def test_firetv_set_input_uses_passthrough_uri(monkeypatch: pytest.MonkeyPatch) 
         return 0, b"Starting: Intent", ""
 
     async def fake_read(serial: str, cmd: str) -> str:
+        if "tv_input" in cmd:
+            return TV_INPUT_DUMP
         return "mWakefulness=Awake" if "power" in cmd else "  mResumedActivity: x"
 
     async def ready(d: dict[str, Any]) -> str:
@@ -740,7 +749,7 @@ def test_firetv_set_input_uses_passthrough_uri(monkeypatch: pytest.MonkeyPatch) 
         adbops.passthrough_uri("x; reboot")
 
     async def asleep(serial: str, cmd: str) -> str:
-        return "mWakefulness=Asleep"
+        return TV_INPUT_DUMP if "tv_input" in cmd else "mWakefulness=Asleep"
 
     monkeypatch.setattr(adbops, "read", asleep)
     calls.clear()
@@ -765,7 +774,7 @@ def test_firetv_set_input_uses_input_key(monkeypatch: pytest.MonkeyPatch) -> Non
         return 0, b"", ""
 
     async def awake(serial: str, cmd: str) -> str:
-        return "mWakefulness=Awake"
+        return TV_INPUT_DUMP if "tv_input" in cmd else "mWakefulness=Awake"
 
     async def ready(d: dict[str, Any]) -> str:
         return "ser"
@@ -781,7 +790,7 @@ def test_firetv_set_input_uses_input_key(monkeypatch: pytest.MonkeyPatch) -> Non
         run(adbops.set_input_key(dev, "BACK; reboot"))
 
     async def asleep(serial: str, cmd: str) -> str:
-        return "mWakefulness=Asleep"
+        return TV_INPUT_DUMP if "tv_input" in cmd else "mWakefulness=Asleep"
 
     monkeypatch.setattr(adbops, "read", asleep)
     calls.clear()

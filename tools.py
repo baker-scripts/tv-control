@@ -20,6 +20,7 @@ from PIL import Image as PillowImage
 import adbops
 import appcache
 import apppolicy
+import inputs
 import messages
 import plexnow
 import scan
@@ -1096,64 +1097,82 @@ async def do_list_apps(
     return await cached_list(device, "apps", refresh, background)
 
 
+INPUT_CONFIG = ("inputs", "input_ids", "input_keys", "input_aliases")
+
+
+def inputs_refusal(dev: dict[str, Any]) -> str | None:
+    """devices.yml ceiling for inputs: the inputs capability or any input config allows them."""
+    if "inputs" in (dev.get("capabilities") or []) or any(
+        dev.get(k) for k in INPUT_CONFIG
+    ):
+        return None
+    return f"unsupported_on_device: {dev['name']} has no 'inputs' capability in devices.yml"
+
+
+async def discover_inputs(dev: dict[str, Any]) -> list[dict[str, Any]]:
+    """Live, read-only: the inputs the device itself lists, plus the devices.yml names for them."""
+    found = await _by_type(dev, adbops.list_inputs, webos.list_inputs)(dev)
+    appcache.put(dev["name"], "inputs", found)
+    return inputs.with_config(dev, found)
+
+
+async def resolve_input(dev: dict[str, Any], name: str) -> dict[str, Any]:
+    """The discovered input a spoken name or id means; raises InputRefusal or DeviceError."""
+    why = inputs_refusal(dev)
+    if why:
+        raise DeviceError(why)
+    return inputs.resolve(dev, name, await discover_inputs(dev))
+
+
+def input_route(dev: dict[str, Any], hit: dict[str, Any]) -> str:
+    if dev["type"] == "webos":
+        return "webos set_input"
+    key = (dev.get("input_keys") or {}).get(hit.get("key") or "")
+    return f"keyevent {key}" if key else "passthrough intent"
+
+
+async def _switch_input(dev: dict[str, Any], hit: dict[str, Any]) -> dict[str, Any]:
+    if dev["type"] == "webos":
+        body = await webos.set_input(dev, hit["id"])
+    elif key := (dev.get("input_keys") or {}).get(hit.get("key") or ""):
+        body = await adbops.set_input_key(dev, str(key))
+    else:
+        body = await adbops.set_input(dev, hit["id"])
+    return {**body, "label": hit["label"]}
+
+
 async def do_list_inputs(
     device: str, refresh: bool = False, background: bool = False
 ) -> dict[str, Any]:
+    """The device's own input list (webOS from a 24 h cache, ADB live) with devices.yml names."""
     try:
         dev = await get_device(device)
-        if not dev.get("inputs"):
-            require_capability(dev, "inputs")
-        if dev["type"] != "webos":
-            return {
-                "device": device,
-                "inputs": [
-                    {
-                        "id": key,
-                        "label": label,
-                        **(
-                            {}
-                            if (dev.get("input_keys") or {}).get(key)
-                            or (dev.get("input_ids") or {}).get(key)
-                            else {
-                                "error": "Input switching is not verified for this Fire TV; unavailable."
-                            }
-                        ),
-                    }
-                    for key, label in (dev.get("inputs") or {}).items()
-                ],
-                "current_input": None,
-            }
+        why = inputs_refusal(dev)
+        if why:
+            raise DeviceError(why)
     except DeviceError as exc:
         return {"device": device, **exc.body()}
-    body = await cached_list(device, "inputs", refresh, background)
+    body: dict[str, Any]
+    if dev["type"] == "webos":
+        body = await cached_list(device, "inputs", refresh, background)
+        if "error" not in body:
+            body["inputs"] = inputs.with_config(dev, body.get("inputs", []))
+    else:
+
+        async def live(d: dict[str, Any]) -> dict[str, Any]:
+            return {"inputs": await discover_inputs(d), "current_input": None}
+
+        body = await guarded(device, live, locked=False)
     if "error" in body:
-        if dev.get("inputs"):
-            body["inputs"] = [
-                {
-                    "id": key,
-                    "label": label,
-                    "error": "Input list unavailable; retry when the TV is online.",
-                }
-                for key, label in dev["inputs"].items()
-            ]
-        return body
-    configured = dev.get("inputs")
-    if configured:
-        reported = {i["id"]: i for i in body.get("inputs", [])}
+        raw = dev.get("inputs")
+        labels: dict[str, Any] = raw if isinstance(raw, dict) else {}
         body["inputs"] = [
             {
-                **reported.get(key, {}),
                 "id": key,
-                "label": label,
-                **(
-                    {}
-                    if key in reported
-                    else {
-                        "error": f"Unknown configured input {key}; refresh the input list."
-                    }
-                ),
+                "label": str(labels.get(key) or key),
+                "error": "Input list unavailable; retry when the TV is online.",
             }
-            for key, label in configured.items()
+            for key in inputs.configured_keys(dev)
         ]
     return body
 
@@ -1262,37 +1281,20 @@ async def _webos_off(dev: dict[str, Any]) -> dict[str, Any]:
 
 async def do_wake(device: str) -> dict[str, Any]:
     async def act(dev: dict[str, Any]) -> dict[str, Any]:
-        if dev["type"] == "shield":
+        if dev["type"] != "shield":
+            require_capability(dev, "wake")
+        if dev["type"] in adbops.ADB_TYPES:
             return await adbops.send_key(dev, "WAKEUP")
-        require_capability(dev, "wake")
         return await webos.wake(dev)
 
     return await guarded(device, act)
 
 
 async def do_set_input(device: str, input_id: str) -> dict[str, Any]:
+    """Switch to an input the device lists, named by id, configured key, alias, port, or device name."""
+
     async def act(dev: dict[str, Any]) -> dict[str, Any]:
-        if not dev.get("inputs"):
-            require_capability(dev, "inputs")
-        configured = dev.get("inputs") or {}
-        if configured and input_id not in configured:
-            raise DeviceError(f"Unknown configured input {input_id!r}")
-        if dev["type"] == "firetv":
-            input_key = (dev.get("input_keys") or {}).get(input_id)
-            if input_key:
-                return await adbops.set_input_key(dev, input_key)
-            tv_input_id = (dev.get("input_ids") or {}).get(input_id)
-            if not tv_input_id:
-                raise DeviceError(
-                    "unsupported_on_device: no TV input id configured for "
-                    f"{input_id!r} (input_ids in devices.yml; read it from dumpsys tv_input)"
-                )
-            return await adbops.set_input(dev, tv_input_id)
-        if dev["type"] != "webos":
-            raise DeviceError(
-                "unsupported_on_device: input switching is not verified for this device type"
-            )
-        return await webos.set_input(dev, input_id)
+        return await _switch_input(dev, await resolve_input(dev, input_id))
 
     return await guarded(device, act)
 
@@ -1568,10 +1570,15 @@ async def in_use_refusal(
 
 
 async def write_gate(
-    device: str, force: bool, app: str | None = None, paired: bool = False
+    device: str,
+    force: bool,
+    app: str | None = None,
+    paired: bool = False,
+    in_use: bool = True,
 ) -> dict[str, Any] | None:
     """The policy check before every agent write verb: the app policy (never skipped by force),
-    then the in-use refusal. Returns the refusal reply, or None to go ahead."""
+    then the in-use refusal (in_use=False for toast, whose message policy decides instead).
+    Returns the refusal reply, or None to go ahead."""
     if app is not None:
         try:
             await check_app(await get_device(device), app)
@@ -1579,9 +1586,266 @@ async def write_gate(
             return {"device": device, **exc.body()}
         except DeviceError:
             pass  # The verb itself reports a lookup or inventory error.
+    if not in_use:
+        return None
     if paired:
         return await in_use_refusal(device, force, paired=True)
     return await in_use_refusal(device, force)
+
+
+async def gated(
+    device: str,
+    force: bool,
+    act: Callable[[], Awaitable[dict[str, Any]]],
+    app: str | None = None,
+    paired: bool = False,
+    in_use: bool = True,
+) -> dict[str, Any]:
+    """The one path for every agent write verb: write_gate first, then the action."""
+    refusal = await write_gate(device, force, app=app, paired=paired, in_use=in_use)
+    return refusal or await act()
+
+
+# ---------- capabilities ----------
+
+# Verbs that read or write through ADB only; webOS has no route for them.
+ADB_ONLY_VERBS = frozenset(
+    {
+        "current_screen",
+        "what_is_on",
+        "screenshot",
+        "navigate",
+        "send_text",
+        "open_app",
+        "go_home",
+        "play_title",
+        "narrate",
+        "reboot",
+        "pair_start",
+        "pair_finish",
+        "apply_baseline",
+        "lockdown",
+    }
+)
+WEBOS_ONLY_VERBS = frozenset({"webos_pair"})
+# Verbs devices.yml capabilities: can remove (never add). find_remote is also Shield only.
+CAPABILITY_VERBS = {"find_remote": "find_remote", "power": "power"}
+SITE_VERBS = frozenset({"list_devices", "scan_site", "capabilities"})
+
+
+def volume_path(dev: dict[str, Any]) -> tuple[str | None, str | None]:
+    """(route, None) for the volume keys on dev, or (None, why not)."""
+    if dev.get("volume_via"):
+        return f"webos:{dev['volume_via']}", None
+    if dev["type"] == "webos":
+        return "webos", None
+    why = unsupported_cec(dev, "VOLUME_UP")
+    if why:
+        return None, why
+    return "hdmi-cec (key event; the TV or receiver acts on it)", None
+
+
+def verb_refusal(dev: dict[str, Any], verb: str) -> str | None:
+    """Why a verb cannot run on dev from its platform and devices.yml alone (no device call), or None."""
+    kind = dev["type"]
+    adb = kind in adbops.ADB_TYPES
+    if verb in ADB_ONLY_VERBS and not adb:
+        return f"unsupported_on_device: {verb} is Android only"
+    if verb in WEBOS_ONLY_VERBS and kind != "webos":
+        return f"unsupported_on_device: {verb} is webOS only"
+    if verb in ("pair_start", "pair_finish") and kind != "shield":
+        return "unsupported_on_device: fast-key pairing is Shield only"
+    if verb == "find_remote" and kind != "shield":
+        return "unsupported_on_device: find_remote is Shield only"
+    cap = CAPABILITY_VERBS.get(verb)
+    if cap and cap not in (dev.get("capabilities") or []):
+        return f"unsupported_on_device: {dev['name']} has no {cap!r} capability in devices.yml"
+    if (
+        verb == "wake"
+        and kind != "shield"
+        and "wake" not in (dev.get("capabilities") or [])
+    ):
+        return f"unsupported_on_device: {dev['name']} has no 'wake' capability in devices.yml"
+    if (
+        verb == "sleep_timer"
+        and not adb
+        and "sleep_timer" not in (dev.get("capabilities") or [])
+    ):
+        return f"unsupported_on_device: {dev['name']} has no 'sleep_timer' capability in devices.yml"
+    if verb in ("set_input", "list_inputs"):
+        return inputs_refusal(dev)
+    if verb == "send_text" and kind == "webos":
+        return "unsupported_on_device: text entry is Android only"
+    return None
+
+
+ACTION_VERB = {
+    "open_app": "launch_app",
+    "switch_input": "set_input",
+    "play_title": "play_title",
+    "wake": "wake",
+    "sleep": "power",
+}
+
+
+async def do_capabilities(device: str) -> dict[str, Any]:
+    """Read-only: what dev can do, from its platform and live reads, cut by devices.yml."""
+
+    async def act(dev: dict[str, Any]) -> dict[str, Any]:
+        names = sorted(t.name for t in await mcp.list_tools())
+        verbs = {
+            name: ({"ok": True} if why is None else {"ok": False, "why": why})
+            for name in names
+            if name not in SITE_VERBS
+            for why in [verb_refusal(dev, name)]
+        }
+        route, why = volume_path(dev)
+        volume = {"path": route} if route else {"path": None, "why": why}
+        body: dict[str, Any] = {"type": dev["type"], "verbs": verbs, "volume": volume}
+        apps = await cached_list(dev["name"], "apps", background=True)
+        body["apps"] = apppolicy.visible(
+            dev, apps.get("apps", []), await load_denied_apps()
+        )
+        if "error" in apps:
+            body["apps_error"] = apps["error"]
+        if inputs_refusal(dev):
+            body["inputs"] = []
+            body["inputs_error"] = inputs_refusal(dev)
+        else:
+            listed = await do_list_inputs(dev["name"])
+            body["inputs"] = [
+                {k: i[k] for k in ("id", "label", "names", "error") if k in i}
+                for i in listed.get("inputs", [])
+            ]
+            if "error" in listed:
+                body["inputs_error"] = listed["error"]
+        switchable = [i for i in body["inputs"] if "error" not in i]
+        actions: dict[str, Any] = {}
+        for action in ACTIONS:
+            verb = ACTION_VERB.get(action)
+            why = verb_refusal(dev, verb) if verb else None
+            if action == "switch_input" and why is None and not switchable:
+                why = body.get("inputs_error") or "no_inputs: the device lists none"
+            if action == "play_title" and why is None:
+                why = apppolicy.refusal(
+                    dev, PLEX_PKG, _app_labels(dev, PLEX_PKG), await load_denied_apps()
+                )
+            if action == "volume":
+                why = volume.get("why")
+            actions[action] = {"ok": True} if why is None else {"ok": False, "why": why}
+        body["actions"] = actions
+        return body
+
+    return await guarded(device, act, locked=False)
+
+
+# ---------- tv_action ----------
+
+ACTIONS = ("open_app", "switch_input", "play_title", "wake", "sleep", "volume")
+VOLUME_KEYS = {"up": "VOLUME_UP", "down": "VOLUME_DOWN", "mute": "VOLUME_MUTE"}
+Plan = tuple[dict[str, Any], Callable[[], Awaitable[dict[str, Any]]]]
+
+
+def _play_target(target: str) -> tuple[str, str, int]:
+    parts = target.strip().split(":")
+    if len(parts) not in (2, 3) or not all(parts[:2]):
+        raise DeviceError(
+            "play_title target is machine_id:rating_key or machine_id:rating_key:view_offset_ms"
+        )
+    offset = parts[2] if len(parts) == 3 else "0"
+    if not offset.isdigit():
+        raise DeviceError("view_offset_ms must be whole milliseconds")
+    return parts[0], parts[1], int(offset)
+
+
+async def _plan(dev: dict[str, Any], action: str, target: str, narrate: bool) -> Plan:
+    """What the action would do on dev (no device write), and the call that does it."""
+    name = dev["name"]
+    if action == "open_app":
+        app_id = await check_app(dev, target)
+        if dev["type"] == "webos":
+            return {"app": app_id, "route": "webos launch"}, lambda: do_launch(
+                name, app_id
+            )
+        _require_adb(dev, "open_app")
+        shown = (
+            SHIELD_HOME_APP
+            if dev["type"] == "shield" and app_id in STOCK_LAUNCHERS
+            else app_id
+        )
+        return {
+            "app": shown,
+            "route": "open and confirm in front",
+        }, lambda: do_open_app(name, app_id, narrate)
+    if action == "switch_input":
+        hit = await resolve_input(dev, target)
+
+        async def switch() -> dict[str, Any]:
+            return await guarded(name, lambda d: _switch_input(d, hit))
+
+        would = {
+            "input": hit["id"],
+            "label": hit["label"],
+            "route": input_route(dev, hit),
+        }
+        return would, switch
+    if action == "play_title":
+        _require_adb(dev, "play_title")
+        machine_id, rating_key, offset = _play_target(target)
+        uri = plex_deep_link(machine_id, rating_key, offset)
+        return {"deep_link": uri, "app": PLEX_PKG}, lambda: do_play_title(
+            name, machine_id, rating_key, narrate, offset
+        )
+    if action in ("wake", "sleep"):
+        why = verb_refusal(dev, ACTION_VERB[action])
+        if why:
+            raise DeviceError(why)
+        adb = dev["type"] in adbops.ADB_TYPES
+        if action == "wake":
+            how = "WAKEUP key" if adb else "Wake-on-LAN"
+            return {"route": how}, lambda: do_wake(name)
+        how = "SLEEP key (standby)" if adb else "webOS power off"
+        return {"route": how}, lambda: do_power(name, "off")
+    found = VOLUME_KEYS.get(target.strip().lower())
+    if found is None:
+        raise DeviceError("volume target is up, down, or mute")
+    key: str = found
+    route, why = volume_path(dev)
+    if route is None:
+        raise DeviceError(why or "unsupported_on_device: no volume path")
+    return {"key": key, "route": route}, lambda: do_key(name, key)
+
+
+async def do_action(
+    device: str,
+    action: str,
+    target: str = "",
+    shadow: bool = False,
+    narrate: bool = False,
+    force: bool = False,
+) -> dict[str, Any]:
+    """One write path: write_gate, then plan (resolve the target), then run it unless shadow."""
+    app = (
+        target if action == "open_app" else PLEX_PKG if action == "play_title" else None
+    )
+    paired = action in ("open_app", "switch_input", "play_title")
+
+    async def act() -> dict[str, Any]:
+        if action not in ACTIONS:
+            return {
+                "device": device,
+                "error": f"unknown_action: {action!r}; one of {', '.join(ACTIONS)}",
+            }
+        try:
+            dev = await get_device(device)
+            would, run_it = await _plan(dev, action, target, narrate)
+        except DeviceError as exc:
+            return {"device": device, "action": action, **exc.body()}
+        if shadow:
+            return {"device": device, "action": action, "shadow": True, "would": would}
+        return {**await run_it(), "action": action}
+
+    return await gated(device, force, act, app=app, paired=paired)
 
 
 @mcp.tool()
@@ -1635,11 +1899,13 @@ async def send_key(
 
     expect_app (and optional expect_focus, matched against the focused view's text, description, or id)
     reads current_screen first and refuses with screen_mismatch. For key sequences use navigate."""
-    return (
-        await write_gate(device, force)
-        or await screen_guard(device, expect_app, expect_focus)
-        or await do_key(device, key)
-    )
+
+    async def act() -> dict[str, Any]:
+        return await screen_guard(device, expect_app, expect_focus) or await do_key(
+            device, key
+        )
+
+    return await gated(device, force, act)
 
 
 @mcp.tool()
@@ -1652,15 +1918,17 @@ async def navigate(
     force: bool = False,
 ) -> dict[str, Any]:
     """Send up to 10 comma-separated navigation keys (DPAD_*, OK, BACK, MEDIA_PLAY/PAUSE). current_screen is read before every key: expect_app must stay in front, and expect_focus (if set) must match the focused view before the first key; otherwise screen_mismatch and no further key. Returns the final screen."""
-    return await write_gate(device, force) or await do_navigate(
-        device, keys, expect_app, expect_focus, narrate
+    return await gated(
+        device,
+        force,
+        lambda: do_navigate(device, keys, expect_app, expect_focus, narrate),
     )
 
 
 @mcp.tool()
 async def send_text(device: str, text: str, force: bool = False) -> dict[str, Any]:
     """Type text into the focused field of an Android device: Remote v2 IME when paired, else adb input text."""
-    return await write_gate(device, force) or await do_text(device, text)
+    return await gated(device, force, lambda: do_text(device, text))
 
 
 @mcp.tool()
@@ -1682,35 +1950,54 @@ async def list_apps(device: str, refresh: bool = False) -> dict[str, Any]:
 
 
 @mcp.tool()
+async def capabilities(device: str) -> dict[str, Any]:
+    """Read-only: what a device can do now. verbs (ok or why not), actions for tv_action, apps automation may open, inputs the device lists (with names), and the volume path. Derived from the platform and live reads; devices.yml can only remove."""
+    return await do_capabilities(device)
+
+
+@mcp.tool()
+async def tv_action(
+    device: str,
+    action: str,
+    target: str = "",
+    shadow: bool = False,
+    narrate: bool = False,
+    force: bool = False,
+) -> dict[str, Any]:
+    """One write verb. action: open_app (target: app name or id), switch_input (target: input name, port such as "HDMI 2", device name, alias, or id), play_title (target: machine_id:rating_key[:view_offset_ms]), wake, sleep (standby), volume (target: up, down, mute). Every action passes the same write gate as the single verbs (app policy, in-use refusal). shadow=true returns what it would do (resolved app, input, route) without doing it."""
+    return await do_action(device, action, target, shadow, narrate, force)
+
+
+@mcp.tool()
 async def list_inputs(device: str, refresh: bool = False) -> dict[str, Any]:
-    """List the inputs of an LG webOS TV (id and label), from a 24 h cache; refresh=true goes live."""
+    """List the inputs the device itself reports (LG webOS input list; Android TV input service on a Fire TV), with id, label, and the names set_input accepts. webOS is served from a 24 h cache; refresh=true goes live."""
     return await do_list_inputs(device, refresh)
 
 
 @mcp.tool()
 async def set_input(device: str, input_id: str, force: bool = False) -> dict[str, Any]:
-    """Switch an LG webOS TV to an explicit input id from list_inputs. There is no default input."""
-    return await write_gate(device, force, paired=True) or await do_set_input(
-        device, input_id
+    """Switch to an input the device lists: id, port ("HDMI 2"), connected device name ("Shield"), devices.yml label, or input_aliases name. An unlisted or ambiguous name is refused with candidates; there is no default input."""
+    return await gated(
+        device, force, lambda: do_set_input(device, input_id), paired=True
     )
 
 
 @mcp.tool()
 async def wake(device: str, force: bool = False) -> dict[str, Any]:
     """Wake an LG webOS TV with Wake-on-LAN sent from the site's LAN relay (devices.yml mac and wol_relay)."""
-    return await write_gate(device, force) or await do_wake(device)
+    return await gated(device, force, lambda: do_wake(device))
 
 
 @mcp.tool()
 async def power(device: str, state: str, force: bool = False) -> dict[str, Any]:
     """Power a device on or off. Off is KEYCODE_SLEEP (standby) on ADB devices and power off on webOS."""
-    return await write_gate(device, force) or await do_power(device, state)
+    return await gated(device, force, lambda: do_power(device, state))
 
 
 @mcp.tool()
 async def find_remote(device: str, force: bool = False) -> dict[str, Any]:
     """Make an NVIDIA Shield remote buzz (Remote Locator). Needs the find_remote capability in devices.yml."""
-    return await write_gate(device, force) or await do_find_remote(device)
+    return await gated(device, force, lambda: do_find_remote(device))
 
 
 @mcp.tool()
@@ -1718,16 +2005,16 @@ async def sleep_timer(
     device: str, minutes: int = -1, force: bool = False
 ) -> dict[str, Any]:
     """Set a server-side sleep timer (15, 30, 60, or 90 min), cancel it (0), or read it (omit minutes)."""
-    return await write_gate(device, force) or await do_sleep_timer(
-        device, None if minutes < 0 else minutes
+    return await gated(
+        device, force, lambda: do_sleep_timer(device, None if minutes < 0 else minutes)
     )
 
 
 @mcp.tool()
 async def launch_app(device: str, app: str, force: bool = False) -> dict[str, Any]:
     """Launch an app by package id, webOS app id, or name (see list_apps). A name resolves by exact label, id, app_aliases, then unique prefix; ambiguous_app or unknown_app returns candidates. denied_apps, allowed_apps, and protected targets (stores, Settings, sign-in) are refused even with force=true."""
-    return await write_gate(device, force, app=app, paired=True) or await do_launch(
-        device, app
+    return await gated(
+        device, force, lambda: do_launch(device, app), app=app, paired=True
     )
 
 
@@ -1736,8 +2023,8 @@ async def open_app(
     device: str, app: str, narrate: bool = False, force: bool = False
 ) -> dict[str, Any]:
     """Launch an Android app by package id or name (resolved as in launch_app, same app policy), then confirm it is in front (error not_confirmed otherwise). narrate=true shows the assistant intro and how a person does it first."""
-    return await write_gate(device, force, app=app, paired=True) or await do_open_app(
-        device, app, narrate
+    return await gated(
+        device, force, lambda: do_open_app(device, app, narrate), app=app, paired=True
     )
 
 
@@ -1746,7 +2033,7 @@ async def go_home(
     device: str, narrate: bool = False, force: bool = False
 ) -> dict[str, Any]:
     """Go to the home screen: Projectivy on a Shield (confirmed in front), the HOME key on Fire OS. narrate=true shows the steps first."""
-    return await write_gate(device, force) or await do_go_home(device, narrate)
+    return await gated(device, force, lambda: do_go_home(device, narrate))
 
 
 @mcp.tool()
@@ -1759,9 +2046,13 @@ async def play_title(
     view_offset_ms: int = 0,
 ) -> dict[str, Any]:
     """Play a Plex title by deep link (server machineIdentifier and ratingKey); confirms Plex's media session plays. view_offset_ms starts it at that point (0 keeps Plex's own choice). narrate=true shows the steps first."""
-    return await write_gate(
-        device, force, app=PLEX_PKG, paired=True
-    ) or await do_play_title(device, machine_id, rating_key, narrate, view_offset_ms)
+    return await gated(
+        device,
+        force,
+        lambda: do_play_title(device, machine_id, rating_key, narrate, view_offset_ms),
+        app=PLEX_PKG,
+        paired=True,
+    )
 
 
 @mcp.tool()
@@ -1769,7 +2060,7 @@ async def narrate(
     device: str, steps: str, speak: bool = False, force: bool = False
 ) -> dict[str, Any]:
     """Show "Hi, this is <messages.assistant.name>. I will navigate now." and then each step (separated by |) on screen. speak=true reports that speech is not available."""
-    return await write_gate(device, force) or await do_narrate(device, steps, speak)
+    return await gated(device, force, lambda: do_narrate(device, steps, speak))
 
 
 @mcp.tool()
@@ -1791,16 +2082,21 @@ async def toast(
     (an operator message defaults to operator_push) and is dropped, returned shown=false, when the TV is
     asleep or inside quiet hours (10 pm to 7 am, device clock). requested=true wakes a sleeping TV.
     image: an http(s) poster URL or mdi:<name> (TvOverlay image field). sender is declared, not
-    authenticated: the MCP bearer token is the trust boundary. force is accepted and ignored.
+    authenticated: the MCP bearer token is the trust boundary. force is accepted and ignored (no in-use check).
     Android replies shown=true only after HTTP 200 and a visible TvOverlay window; otherwise an error
     (overlay_app_missing, overlay_not_permitted, screen_not_on, not_shown, not_allowed, wrong_household)."""
-    return await do_toast(device, message, sender, requested, kind, household, image)
+    return await gated(
+        device,
+        force,
+        lambda: do_toast(device, message, sender, requested, kind, household, image),
+        in_use=False,
+    )
 
 
 @mcp.tool()
 async def reboot(device: str, force: bool = False) -> dict[str, Any]:
     """Reboot an ADB device (plain reboot, never power-off). To turn a Shield off, send_key SLEEP."""
-    return await write_gate(device, force) or await do_reboot(device)
+    return await gated(device, force, lambda: do_reboot(device))
 
 
 @mcp.tool()

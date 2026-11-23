@@ -21,6 +21,7 @@ from urllib.parse import quote
 from PIL import Image as PILImage
 
 import appcache
+import inputs
 from inventory import DeviceError, run
 
 ADB_TIMEOUT_S = 20
@@ -667,11 +668,18 @@ async def set_input(dev: dict[str, Any], tv_input_id: str) -> dict[str, Any]:
     return {"input_set": tv_input_id, "via": "am start passthrough", "resumed": resumed}
 
 
+async def list_inputs(dev: dict[str, Any]) -> list[dict[str, Any]]:
+    """Read-only: the HDMI inputs the device's TV input service lists (none on a streaming device)."""
+    serial = await require_device(dev)
+    return inputs.parse_android(await read(serial, inputs.ANDROID_READ))
+
+
 INPUT_KEY_RE = re.compile(r"^TV_INPUT_[A-Z0-9_]+$")
 
 
 async def set_input_key(dev: dict[str, Any], key: str) -> dict[str, Any]:
     """Switch a Fire TV input with a TV_INPUT_* keyevent. Never wakes the TV."""
+    key = key.removeprefix("KEYCODE_")
     if not INPUT_KEY_RE.match(key):
         raise DeviceError(f"invalid input key {key!r}")
     serial = await require_device(dev)
