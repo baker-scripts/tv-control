@@ -40,7 +40,7 @@ module = ["apkutils"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
-module = ["test_lint", "test_panel", "test_tools", "test_static", "test_webos", "test_adbops", "test_scan_app", "test_e2e_smoke", "test_keys", "test_overlay", "test_screen", "test_navigation", "test_narrate", "test_screen_guard", "test_messages", "test_toast_policy", "test_leaks"]
+module = ["test_lint", "test_panel", "test_tools", "test_static", "test_webos", "test_adbops", "test_scan_app", "test_e2e_smoke", "test_keys", "test_overlay", "test_screen", "test_navigation", "test_narrate", "test_screen_guard", "test_messages", "test_toast_policy", "test_leaks", "test_labels"]
 implicit_reexport = true
 warn_unused_ignores = false
 disable_error_code = ["arg-type", "union-attr", "no-any-return", "attr-defined"]

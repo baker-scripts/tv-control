@@ -12,6 +12,7 @@ from typing import Any
 
 CACHE_FILE = Path(os.environ.get("APP_CACHE_FILE", "/config/app-cache.json"))
 TTL_S = 24 * 3600
+LABEL_MISS_RETRY_S = 3600
 
 FALLBACK_LABELS = {
     "com.plexapp.android": "Plex",
@@ -48,9 +49,13 @@ FALLBACK_LABELS = {
 
 
 def app_title(app_id: str, title: str | None = None) -> str:
+    """Curated name first, then the device's own label, then the bare package name."""
+    curated = FALLBACK_LABELS.get(app_id)
+    if curated:
+        return curated
     if title and title.strip() and title != app_id and not title.startswith("@"):
         return title.strip()
-    return FALLBACK_LABELS.get(app_id, "Unknown app")
+    return app_id
 
 
 def friendly_apps(items: list[dict[str, str]]) -> list[dict[str, str]]:
@@ -78,10 +83,37 @@ def put(device: str, kind: str, items: list[Any], now: float | None = None) -> N
         "items": items,
         "fetched_at": time.time() if now is None else now,
     }
+    _write(data)
+
+
+def _write(data: dict[str, Any]) -> None:
     CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
     tmp = CACHE_FILE.with_suffix(".tmp")
     tmp.write_text(json.dumps(data))
     tmp.replace(CACHE_FILE)
+
+
+def cached_label(
+    device: str, pkg: str, now: float | None = None
+) -> tuple[bool, str | None]:
+    """(known, label) for a device's package. A found label never expires; a miss is retried after LABEL_MISS_RETRY_S."""
+    entry = ((_read().get(device) or {}).get("labels") or {}).get(pkg)
+    if not entry:
+        return False, None
+    if entry.get("label"):
+        return True, str(entry["label"])
+    return (time.time() if now is None else now) - entry[
+        "at"
+    ] < LABEL_MISS_RETRY_S, None
+
+
+def put_label(
+    device: str, pkg: str, label: str | None, now: float | None = None
+) -> None:
+    data = _read()
+    labels = data.setdefault(device, {}).setdefault("labels", {})
+    labels[pkg] = {"label": label, "at": time.time() if now is None else now}
+    _write(data)
 
 
 def is_fresh(entry: dict[str, Any], now: float | None = None) -> bool:

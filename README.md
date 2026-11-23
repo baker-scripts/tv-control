@@ -44,6 +44,8 @@ The panel is meant to sit behind a reverse proxy with forward auth (built and te
 | `MCP_PORT` | `8012` | MCP streamable HTTP at `/mcp`. |
 | `DEVICES_FILE` | `/scripts/devices.yml` | Device inventory. |
 | `SCRIPTS_DIR` | `/scripts` | Optional `deploy-config.sh`, `firetv-settings.sh`, and `lockdown.sh` for the baseline and lockdown verbs. Not shipped here. |
+| `TAUTULLI_URL` | (unset) | Tautulli base URL, including any `http_root`. With `TAUTULLI_API_KEY`, status of a Plex client adds `now_playing` from the Plex server's sessions. |
+| `TAUTULLI_API_KEY` | (unset) | Tautulli API key, sent in the `X-Api-Key` header only. |
 | `HOST_CONFIG_DIR` | `/config` | Host path of the `/config` volume, printed for CLI screenshots. |
 | `TV_CONTROL_URL` | `http://127.0.0.1:$MCP_PORT/mcp` | MCP endpoint for `app.py call`, so a CLI on another host can call a remote instance. |
 | `TV_CONTROL_COMMIT_URL` | this repo's `/commit/` URL | Prefix for the commit link in the panel footer. |
@@ -76,6 +78,7 @@ See [`devices.example.yml`](devices.example.yml). Keep the real file outside thi
 | `devices[].inputs` | Input key to button label, for example `HDMI_1: Shield`. |
 | `devices[].input_keys` | Fire TV only: input key to an Android keyevent name, tried before `input_ids`. |
 | `devices[].input_ids` | Fire TV only: input key to the Android TvInputInfo id (from `adb shell dumpsys tv_input`). An input without an id is shown as unavailable. |
+| `devices[].plex_player` | Optional Plex player name for this device. A Plex session matches when its player equals the device `name`, `label`, `plex_player`, or Android device name (case and punctuation ignored). |
 | `devices[].paired_tv` | The device name of the TV a Shield feeds; drives the paired-TV health status. |
 | `denied_apps` | Substrings of package names or titles that are never launched. |
 | `quick_apps` | Quick-launch buttons: `label`, `id` list, optional `title` list. |

@@ -229,6 +229,31 @@ async def status(dev: dict[str, Any]) -> dict[str, Any]:
     return body
 
 
+PASSTHROUGH_PKG = "com.amazon.tv.inputpreference.service"
+HDMI_READ = "dumpsys hdmi_control | grep -E 'mActiveRoutingPath|display_name'"
+ROUTING_RE = re.compile(r"mActiveRoutingPath:\s*0x([0-9a-fA-F]{4})")
+CEC_DEVICE_RE = re.compile(
+    r"display_name:\s*(.*?)\s+power_status:.*?physical_address:\s*0x([0-9a-fA-F]{4})"
+)
+
+
+def parse_hdmi(text: str) -> dict[str, Any]:
+    """HDMI port and the CEC device name on it, from `dumpsys hdmi_control` lines (Fire OS TVs)."""
+    routing = ROUTING_RE.search(text)
+    path = routing.group(1) if routing else "0000"
+    port = int(path[0], 16) or None
+    named = [
+        (addr, name) for name, addr in CEC_DEVICE_RE.findall(text) if addr != "0000"
+    ]
+    exact = [n for a, n in named if a == path]
+    same_port = [n for a, n in named if port and int(a[0], 16) == port]
+    return {"hdmi_port": port, "hdmi_device": (exact or same_port or [None])[0]}
+
+
+async def hdmi_input(serial: str) -> dict[str, Any]:
+    return parse_hdmi(await read(serial, HDMI_READ))
+
+
 HEALTH_READS = {
     "private_dns_mode": "settings get global private_dns_mode",
     "private_dns_specifier": "settings get global private_dns_specifier",
@@ -821,8 +846,8 @@ def apk_label(path: str) -> str | None:
         return label
 
 
-async def app_label(serial: str, pkg: str) -> str:
-    """Read the installed APK's manifest/resources; never install a helper on the TV."""
+async def read_label(serial: str, pkg: str, pull_timeout: float = 90) -> str | None:
+    """The installed APK's own label, or None. Android 11 shell has no label read: query-activities and dumpsys give only a resource id, so the base APK is pulled (read-only; nothing is installed or sent to the TV)."""
     try:
         raw = await shell(serial, f"pm path {check_pkg(pkg)}")
         paths = [
@@ -834,17 +859,19 @@ async def app_label(serial: str, pkg: str) -> str:
             (p for p in paths if p.endswith("/base.apk")), paths[0] if paths else ""
         )
         if not path.startswith("/") or not path.endswith(".apk"):
-            return appcache.app_title(pkg)
+            return None
         with tempfile.TemporaryDirectory(prefix="tv-app-label-") as directory:
             local = str(Path(directory) / "base.apk")
-            rc, _, _ = await adb(serial, "pull", path, local, timeout=90)
+            rc, _, _ = await adb(serial, "pull", path, local, timeout=pull_timeout)
             if rc == 0:
-                return appcache.app_title(
-                    pkg, await asyncio.to_thread(apk_label, local)
-                )
-    except Exception:  # noqa: BLE001 - unreadable APKs or unsupported resource tables use the fallback
-        return appcache.app_title(pkg)
-    return appcache.app_title(pkg)
+                return await asyncio.to_thread(apk_label, local)
+    except Exception:  # noqa: BLE001 - unreadable APKs or unsupported resource tables mean no label
+        return None
+    return None
+
+
+async def app_label(serial: str, pkg: str) -> str:
+    return appcache.app_title(pkg, await read_label(serial, pkg))
 
 
 async def list_apps(dev: dict[str, Any]) -> list[dict[str, str]]:
