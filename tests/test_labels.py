@@ -349,3 +349,117 @@ def test_non_plex_app_gets_no_plex_lookup(monkeypatch: pytest.MonkeyPatch) -> No
     body = run(tools.app_fields(SHIELD, "org.smarttube.stable"))
     assert body == {"app_title": "SmartTube"}
     assert plexnow.is_plex("com.plexapp.plex") and not plexnow.is_plex(None)
+
+
+# Chain 4: a slow device never blocks the app list
+
+
+def fake_device(
+    monkeypatch: pytest.MonkeyPatch, pkgs: list[str], delay: float, serial: str
+) -> dict[str, Any]:
+    """A device whose package query is instant and whose label pulls take `delay` seconds."""
+    seen: dict[str, Any] = {"active": 0, "peak": 0, "pulls": []}
+
+    async def ready(dev: dict[str, Any]) -> str:
+        return serial
+
+    async def shell(_serial: str, command: str) -> str:
+        return (
+            "".join(f"{p}/.Main\n" for p in pkgs)
+            if "query-activities" in command
+            else ""
+        )
+
+    async def read(_serial: str, pkg: str, pull_timeout: float = 90) -> str | None:
+        seen["active"] += 1
+        seen["peak"] = max(seen["peak"], seen["active"])
+        seen["pulls"].append(pkg)
+        try:
+            await asyncio.sleep(delay)
+        finally:
+            seen["active"] -= 1
+        return pkg.upper()
+
+    monkeypatch.setattr(adbops, "require_device", ready)
+    monkeypatch.setattr(adbops, "shell", shell)
+    monkeypatch.setattr(adbops, "read_label", read)
+    monkeypatch.setattr(adbops, "_label_jobs", {})
+    monkeypatch.setattr(adbops, "_label_slots", {})
+    return seen
+
+
+def test_list_apps_returns_partial_at_the_budget_and_keeps_filling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pkgs = ["a.one", "a.two", "a.three", "a.four", "a.five"]
+    seen = fake_device(monkeypatch, pkgs, 0.2, "slow-1")
+
+    async def go() -> None:
+        apps, partial = await adbops.list_apps(FIRE, budget_s=0.05)
+        assert partial is True
+        assert sorted(a["id"] for a in apps) == sorted(pkgs)
+        assert all(a["title"] == a["id"] for a in apps)
+        await asyncio.gather(*adbops._label_jobs.values())
+        apps, partial = await adbops.list_apps(FIRE, budget_s=0.05)
+        assert partial is False
+        assert {a["id"]: a["title"] for a in apps}["a.one"] == "A.ONE"
+
+    run(go())
+    assert seen["peak"] <= adbops.LABEL_CONCURRENCY
+    assert sorted(seen["pulls"]) == sorted(pkgs)
+
+
+def test_list_apps_reads_each_label_once_across_overlapping_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen = fake_device(monkeypatch, ["a.one", "a.two"], 0.1, "slow-2")
+
+    async def go() -> None:
+        await asyncio.gather(
+            adbops.list_apps(FIRE, budget_s=1), adbops.list_apps(FIRE, budget_s=1)
+        )
+
+    run(go())
+    assert sorted(seen["pulls"]) == ["a.one", "a.two"]
+
+
+def test_list_apps_serves_cached_labels_without_pulling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen = fake_device(monkeypatch, ["a.one", "a.two"], 5, "slow-3")
+    appcache.put_label("fire-a", "a.one", "One")
+    appcache.put_label("fire-a", "a.two", None)
+    apps, partial = run(adbops.list_apps(FIRE, budget_s=0.05))
+    assert partial is False
+    assert {a["id"]: a["title"] for a in apps} == {"a.one": "One", "a.two": "a.two"}
+    assert seen["pulls"] == []
+
+
+def test_partial_app_list_is_flagged_and_goes_stale_soon(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def lists(dev: dict[str, Any]) -> tuple[dict[str, list[Any]], bool]:
+        return {"apps": [{"id": "a.one", "title": "a.one"}]}, True
+
+    async def get_device(name: str) -> dict[str, Any]:
+        return FIRE
+
+    monkeypatch.setattr(tools, "_live_lists", lists)
+    monkeypatch.setattr(tools, "get_device", get_device)
+    reply = run(tools.refresh_lists("fire-a"))
+    assert reply["refreshed"] == ["apps"] and reply["partial"] is True
+    entry = appcache.get("fire-a", "apps")
+    assert entry is not None and entry["partial"] is True
+    assert appcache.is_fresh(entry, now=entry["fetched_at"] + 60)
+    assert not appcache.is_fresh(
+        entry, now=entry["fetched_at"] + appcache.PARTIAL_TTL_S + 1
+    )
+    body = run(tools.do_list_apps("fire-a", background=True))
+    assert body["partial"] is True and body["apps"][0]["id"] == "a.one"
+
+
+def test_complete_app_list_carries_no_partial_flag() -> None:
+    appcache.put("fire-a", "apps", [{"id": "a.one", "title": "One"}])
+    entry = appcache.get("fire-a", "apps")
+    assert entry is not None and "partial" not in entry
+    assert "partial" not in run(tools.do_list_apps("fire-a", background=True))
