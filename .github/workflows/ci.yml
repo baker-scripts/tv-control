@@ -36,6 +36,11 @@ jobs:
       - name: Check yq
         run: yq --version
 
+      - name: PII guard
+        env:
+          PII_TERMS: ${{ secrets.PII_TERMS }}
+        run: python3 scripts/check_pii.py
+
       - name: Ruff
         run: |
           uv run --locked ruff check .

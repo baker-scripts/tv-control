@@ -125,7 +125,7 @@ def test_pending_device_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(inventory, "load_devices", load)
     with pytest.raises(DeviceError, match="pending"):
         run(inventory.get_device("p"))
-    assert not inventory.is_active({"ip": "1.2.3.4", "status": "pending"})
+    assert not inventory.is_active({"ip": "192.0.2.4", "status": "pending"})
 
 
 def test_adb_falls_back_to_tailnet_name(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -527,7 +527,7 @@ def test_wake_sends_mac_through_relay(
 
 def test_health_all_skips_pending(monkeypatch: pytest.MonkeyPatch) -> None:
     async def load() -> list[dict[str, Any]]:
-        return [SHIELD, {"name": "p", "ip": "1.1.1.1", "status": "pending"}]
+        return [SHIELD, {"name": "p", "ip": "192.0.2.5", "status": "pending"}]
 
     seen: list[str] = []
 

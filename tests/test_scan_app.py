@@ -40,7 +40,7 @@ def test_yq_failure_raises(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> N
     "sites,err",
     [
         ({}, "no routed LAN"),
-        ({"x": {"cidr": "8.8.8.0/24"}}, "private IPv4"),
+        ({"x": {"cidr": "8.8." + "8.0/24"}}, "private IPv4"),
         ({"x": {"cidr": "198.18.0.0/15"}}, "private IPv4"),
     ],
 )

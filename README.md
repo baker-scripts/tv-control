@@ -174,7 +174,7 @@ uv run --locked pytest -m e2e --no-cov   # Playwright smoke at 375 px and 1280 p
 
 Tests need `yq` (mikefarah/yq) on `PATH`. They read `devices.example.yml`; set `DEVICES_FILE` to lint your own inventory with `tests/test_lint.py`.
 
-`tests/test_leaks.py` fails on any RFC 1918 or Tailscale CGNAT (100.64/10) address, a `*.internal` host name, a `tail<hex>.ts.net` name, or a deploy-specific path in a tracked file. Keep site values in `devices.yml` and env; examples use 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24, and example.com.
+This is a public repo: nothing personal goes in it. `scripts/check_pii.py` runs as a pre-commit hook (`pre-commit install`), in CI, and from `tests/test_leaks.py`. It fails on private, CGNAT, or public IPv4 addresses, MAC addresses, emails, phone numbers, street addresses, `*.internal` and `tail<hex>.ts.net` names, and deploy-specific paths in any tracked file. Real names, device labels, serials, and hosts are matched from a list kept outside the repo: set `PII_TERMS` (one term per line, the CI secret of the same name) or `PII_TERMS_FILE` (default `~/.config/pii-guard/terms.txt`); a line starting with `re:` is a regex. Without a list only the generic checks run. Keep site values in `devices.yml` and env; examples use 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24, example.com, and neutral names.
 
 ## Releases
 
