@@ -1,0 +1,9 @@
+repos:
+  - repo: local
+    hooks:
+      - id: pii-guard
+        name: Block personal and site-specific data
+        entry: python3 scripts/check_pii.py
+        language: system
+        pass_filenames: false
+        always_run: true
