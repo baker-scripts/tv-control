@@ -25,3 +25,14 @@ def read_policy() -> dict[str, Any]:
 @pytest.fixture
 def policy() -> dict[str, Any]:
     return read_policy()
+
+
+@pytest.fixture(autouse=True)
+def no_alias_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tests mock the inventory; app_aliases defaults to none instead of reading DEVICES_FILE."""
+    import tools
+
+    async def none() -> dict[str, Any]:
+        return {}
+
+    monkeypatch.setattr(tools, "load_app_aliases", none)

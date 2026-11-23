@@ -24,6 +24,26 @@ ERROR_HINTS = (
         "On the TV, tick 'Always allow from this computer' and press Allow, then retry.",
     ),
     (
+        "allowlist",
+        "This TV has an allowed_apps list in devices.yml and the app is not on it.",
+        "Pick an app on the list (list_apps shows them), or add its package id to allowed_apps.",
+    ),
+    (
+        "protected_target",
+        "Automation never opens an app store, Settings, or an account sign-in screen.",
+        "Ask someone at the TV to open it with the remote.",
+    ),
+    (
+        "ambiguous_app",
+        "More than one app on this TV matches that name.",
+        "Pick one from candidates and pass its id.",
+    ),
+    (
+        "unknown_app",
+        "No app on this TV matches that name.",
+        "Pick one from candidates, call list_apps, or add an app_aliases entry in devices.yml.",
+    ),
+    (
         "denylist",
         "The app is on the tv-control denylist (denied_apps in devices.yml).",
         "Pick a different app; the denylist is edited in devices.yml.",
@@ -133,18 +153,17 @@ async def load_quick_apps() -> list[dict[str, Any]]:
     return await _yq(".quick_apps // []") or []
 
 
+async def load_app_aliases() -> dict[str, Any]:
+    """Top-level app_aliases (spoken name -> package id or list of ids); optional, default empty."""
+    aliases = await _yq(".app_aliases // {}")
+    return aliases if isinstance(aliases, dict) else {}
+
+
 async def load_message_policy() -> dict[str, Any]:
     policy = await _yq(".messages")
     if not isinstance(policy, dict) or not policy:
         raise DeviceError(f"no messages: policy block in {DEVICES_FILE}")
     return policy
-
-
-def check_app_allowed(app: str, denied: list[str]) -> None:
-    low = app.lower()
-    for word in denied:
-        if word and word in low:
-            raise DeviceError(f"{app!r} refused: matches denylist entry {word!r}")
 
 
 def require_capability(dev: dict[str, Any], cap: str) -> None:

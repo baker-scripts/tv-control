@@ -226,7 +226,9 @@ def test_play_title_validates_ids(screen: Screen, mid: str, key: str) -> None:
 def test_navigation_tools_keep_the_in_use_refusal(
     monkeypatch: pytest.MonkeyPatch, screen: Screen, call: Any
 ) -> None:
-    async def busy(device: str, force: bool) -> dict[str, Any] | None:
+    async def busy(
+        device: str, force: bool, paired: bool = False
+    ) -> dict[str, Any] | None:
         return None if force else {"device": device, "error": "in_use: watching"}
 
     monkeypatch.setattr(tools, "in_use_refusal", busy)

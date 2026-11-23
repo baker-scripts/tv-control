@@ -353,22 +353,6 @@ async def index(request: Request) -> Response:
     )
 
 
-def _allowed_apps(body: dict[str, Any]) -> dict[str, Any]:
-    return {
-        **body,
-        "apps": [
-            app
-            for app in body.get("apps", [])
-            if "netflix"
-            not in (
-                str(app.get("id", ""))
-                + str(app.get("title", ""))
-                + str(app.get("label", ""))
-            ).lower()
-        ],
-    }
-
-
 async def api_get(request: Request) -> Response:
     denied = _deny(request, post=False)
     if denied:
@@ -386,12 +370,14 @@ async def api_get(request: Request) -> Response:
         return JSONResponse(await tools.do_what_is_on(name))
     if what == "apps":
         return JSONResponse(
-            _allowed_apps(await tools.do_list_apps(name, refresh, background=True))
+            await tools.launchable_apps(
+                name, await tools.do_list_apps(name, refresh, background=True)
+            )
         )
     if what == "inputs":
         return JSONResponse(await tools.do_list_inputs(name, refresh, background=True))
     if what == "quickapps":
-        return JSONResponse(_allowed_apps(await tools.do_quick_apps(name)))
+        return JSONResponse(await tools.do_quick_apps(name))
     if what == "sleeptimer":
         return JSONResponse(await tools.do_sleep_timer(name))
     if what == "messages":

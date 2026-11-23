@@ -1,4 +1,4 @@
-"""App names: curated override, device label, package name; HDMI passthrough titles; Plex now-playing."""
+"""App names: device label, curated name, package name; HDMI passthrough titles; Plex now-playing."""
 
 import asyncio
 import io
@@ -43,11 +43,13 @@ def cache(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(adbops, "serial_of", lambda dev: "s")
 
 
-# Chain 1: curated override > device label > package name
+# Chain 1: device label > curated name > package name
 
 
-def test_curated_name_overrides_device_label() -> None:
-    assert appcache.app_title("com.plexapp.android", "Plex Media") == "Plex"
+def test_device_label_wins_and_curated_name_fills_a_missing_one() -> None:
+    assert appcache.app_title("com.plexapp.android", "Plex Media") == "Plex Media"
+    assert appcache.app_title("com.plexapp.android", None) == "Plex"
+    assert appcache.app_title("com.plexapp.android", "@string/x") == "Plex"
 
 
 def test_device_label_used_when_not_curated() -> None:

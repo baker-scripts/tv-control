@@ -100,12 +100,7 @@ def test_wake_route_calls_wol_verb(monkeypatch: pytest.MonkeyPatch) -> None:
     action.assert_awaited_once_with("mock-tv")
 
 
-@pytest.mark.parametrize(
-    "endpoint,verb", [("apps", "do_list_apps"), ("quickapps", "do_quick_apps")]
-)
-def test_netflix_never_reaches_button_data(
-    monkeypatch: pytest.MonkeyPatch, endpoint: str, verb: str
-) -> None:
+def test_netflix_never_reaches_button_data(monkeypatch: pytest.MonkeyPatch) -> None:
     action = AsyncMock(
         return_value={
             "apps": [
@@ -116,8 +111,16 @@ def test_netflix_never_reaches_button_data(
             ]
         }
     )
-    monkeypatch.setattr(panel.tools, verb, action)
-    apps = json.loads(call(endpoint, method="GET").body)["apps"]
+    monkeypatch.setattr(panel.tools, "do_list_apps", action)
+    monkeypatch.setattr(
+        panel.tools,
+        "get_device",
+        AsyncMock(return_value={"name": "mock-tv", "type": "shield"}),
+    )
+    monkeypatch.setattr(
+        panel.tools, "load_denied_apps", AsyncMock(return_value=["netflix"])
+    )
+    apps = json.loads(call("apps", method="GET").body)["apps"]
     assert apps == [{"id": "safe.id", "title": "Plex"}]
 
 

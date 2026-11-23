@@ -23,6 +23,10 @@ devices:
     household: family
     paired_tv: living-room-tv
     capabilities: [find_remote, power, sleep_timer]
+    # allowed_apps: optional. When present, automation opens only these ids here (deny by default).
+    allowed_apps:
+      - com.plexapp.android
+      - org.smarttube.stable
   - name: living-room-tv
     site: home
     ip: 192.0.2.21
@@ -63,10 +67,15 @@ devices:
     type: shield
     capabilities: [find_remote]
 
-# Substrings matched against package names and titles; tv-control refuses to launch a match
+# Substrings matched against package ids and app labels; tv-control refuses to launch a match
 # and the panel hides it. netflix is only an example entry.
 denied_apps:
   - netflix
+
+# app_aliases: optional spoken name -> package or webOS id (or a list; the first installed id wins).
+# A device may carry its own app_aliases, which override these.
+app_aliases:
+  youtube tv: [com.google.android.youtube.tvunplugged, youtube.leanback.ytv.v1]
 
 # Quick-launch buttons on each card. id: package or webOS app ids; title: fallback title match.
 quick_apps:

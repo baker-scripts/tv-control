@@ -13,7 +13,7 @@ A web panel and MCP server for a small fleet of TVs: NVIDIA Shields and Fire TVs
 - Health checks, including paired TVs: a Shield with `paired_tv` reports `standby` when its TV is off, and a fault only when the TV is unreachable while the Shield is awake and playing.
 - Site LAN scan for new ADB or webOS devices, with an admin approve step.
 - MCP server (streamable HTTP) with the same verbs, for an AI agent or a script. `python3 /app/app.py call <verb> key=value` calls it from inside the container.
-- An app denylist: `denied_apps` entries are never launched, by the panel or by MCP.
+- One app policy for every verb that opens an app (`launch_app`, `open_app`, `play_title`, panel launch and open): `denied_apps` (id and label) are never launched, a device with `allowed_apps` opens only those ids, and app stores, Settings, and account sign-in apps are never launch targets. Apps are named by package id or by name (see "App names and policy").
 - On-screen messages under a policy in `devices.yml` (`messages:`): who may send, when, how long, and a per-TV history. Android messages go through [TvOverlay](https://github.com/gugutab/TvOverlay).
 - Screen state and guarded navigation on Android: `current_screen`, `what_is_on`, `open_app`, `go_home`, `play_title` (Plex deep link), `navigate`, and optional on-screen narration of each step.
 - A plain `POST /message` on the MCP port (bearer token) for a Home Assistant `rest_command` operator push.
@@ -79,9 +79,12 @@ See [`devices.example.yml`](devices.example.yml). Keep the real file outside thi
 | `devices[].input_keys` | Fire TV only: input key to an Android keyevent name, tried before `input_ids`. |
 | `devices[].input_ids` | Fire TV only: input key to the Android TvInputInfo id (from `adb shell dumpsys tv_input`). An input without an id is shown as unavailable. |
 | `devices[].plex_player` | Optional Plex player name for this device. A Plex session matches when its player equals the device `name`, `label`, `plex_player`, or Android device name (case and punctuation ignored). |
-| `devices[].paired_tv` | The device name of the TV a Shield feeds; drives the paired-TV health status. |
+| `devices[].paired_tv` | The device name of the TV a Shield feeds; drives the paired-TV health status, and an agent's input switch or launch on that TV is refused while the device plays or is open in an app. |
+| `devices[].allowed_apps` | Optional list of package (or webOS app) ids. When present, automation opens only these ids on the device; an empty list opens nothing. Absent keeps every installed app. |
+| `devices[].app_aliases` | Optional spoken name to id (or list of ids) for this device; overrides the top-level `app_aliases`. |
 | `denied_apps` | Substrings of package names or titles that are never launched. |
 | `quick_apps` | Quick-launch buttons: `label`, `id` list, optional `title` list. |
+| `app_aliases` | Optional spoken name to id (or list of ids; the first one installed wins). |
 | `messages` | On-screen message policy; required for `toast`, `narrate`, and `narrate=true`. See below. |
 | `sites.<site>.cidr` | Private LAN that the scan probes. |
 | `sites.<site>.wol_relay` | `user@host` that sends WoL for that site over SSH. |
@@ -125,6 +128,18 @@ curl -sS -X POST "http://<TS_IP>:8012/message" -H "Authorization: Bearer $TV_CON
 | `narrate` | Shows the intro, then each `|`-separated step, 6 s apart, at the device's narration depth. |
 
 The in-use refusal skips a Shield whose app in front was confirmed by `open_app` or `go_home` in the last 120 s while nothing plays, so a multi-step flow runs without `force`.
+
+## App names and policy
+
+`launch_app` and `open_app` take a package id or a name. A name is casefolded with punctuation dropped, then matched in this order against the device's cached app list (`list_apps`):
+
+1. exact label, 2. exact id, 3. an `app_aliases` entry, 4. a package id as given, 5. a unique label prefix.
+
+On a device with `allowed_apps`, an exact label shared by several apps prefers the allowed one, and a prefix matches only allowed apps. An ambiguous or unknown name is refused with `ambiguous_app` or `unknown_app` and a `candidates` list. The resolved id and every known label then pass the policy: `denied_apps` (`denylist`), protected targets (`protected_target`), and `allowed_apps` (`allowlist`). `force=true` skips only the in-use refusal, never the app policy.
+
+The allow list never depends on the device's app list: Android's `cmd package query-activities` (used by `list_apps`) omits disabled and hidden packages, and the policy checks the resolved id itself.
+
+In-use refusal (agent verbs): a Shield or Fire OS device that is awake and playing, or open in an app other than its home screen, TvOverlay, or (Fire OS) an HDMI input; an LG TV whose media pipeline reports `playing` or `paused`. Not readable: an LG app with no media session (a menu or store page), and what plays on an HDMI input with no paired device.
 
 ## Compose example
 
