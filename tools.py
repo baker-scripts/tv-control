@@ -20,6 +20,7 @@ from PIL import Image as PillowImage
 import adbops
 import appcache
 import messages
+import plexnow
 import scan
 import sleeptimer
 import tvremote
@@ -121,6 +122,87 @@ def control_path(
     return lines
 
 
+LABEL_PULL_TIMEOUT_S = 30
+
+
+def hdmi_title(
+    dev: dict[str, Any],
+    devices: list[dict[str, Any]],
+    port: int | None,
+    cec_name: str | None,
+) -> str:
+    """'HDMI <n> (<what is on it>)': the CEC name the TV reports, named from devices.yml when it is a Shield paired to this TV."""
+    base = f"HDMI {port}" if port else "HDMI input"
+    if not cec_name:
+        return base
+    shields = [
+        d
+        for d in devices
+        if d.get("paired_tv") == dev["name"] and d.get("type") == "shield"
+    ]
+    if len(shields) == 1 and "shield" in cec_name.casefold():
+        cec_name = str(shields[0].get("label") or shields[0]["name"])
+    return f"{base} ({cec_name})"
+
+
+async def device_label(
+    dev: dict[str, Any], pkg: str, cached_title: str | None
+) -> str | None:
+    """The app's own label from the device (cached per device and package); None when it has none."""
+    if cached_title and cached_title != pkg:
+        return cached_title
+    known, label = appcache.cached_label(dev["name"], pkg)
+    if known:
+        return label
+    try:
+        label = await adbops.read_label(
+            adbops.serial_of(dev), pkg, pull_timeout=LABEL_PULL_TIMEOUT_S
+        )
+    except DeviceError:
+        return None
+    appcache.put_label(dev["name"], pkg, label)
+    return label
+
+
+async def plex_names(dev: dict[str, Any]) -> list[str | None]:
+    names = [dev["name"], dev.get("label"), dev.get("plex_player")]
+    try:
+        raw = await adbops.read(
+            adbops.serial_of(dev), "settings get global device_name"
+        )
+    except DeviceError:
+        raw = ""
+    return [*names, raw.strip() if raw.strip() != "null" else None]
+
+
+async def app_fields(
+    dev: dict[str, Any], app_id: str, cached_title: str | None = None
+) -> dict[str, Any]:
+    """app_title plus what the device and the Plex server say about the foreground app."""
+    if not app_id:
+        return {"app_title": None}
+    title = appcache.app_title(app_id, cached_title)
+    if dev["type"] not in adbops.ADB_TYPES:
+        return {"app_title": title}
+    extra: dict[str, Any] = {}
+    try:
+        if app_id == adbops.PASSTHROUGH_PKG:
+            hdmi = await adbops.hdmi_input(adbops.serial_of(dev))
+            title = hdmi_title(
+                dev, await load_devices(), hdmi["hdmi_port"], hdmi["hdmi_device"]
+            )
+            extra |= hdmi
+        elif app_id not in appcache.FALLBACK_LABELS:
+            title = appcache.app_title(
+                app_id, await device_label(dev, app_id, cached_title)
+            )
+        if plexnow.is_plex(app_id):
+            extra |= await plexnow.now_playing(await plex_names(dev))
+    except DeviceError:
+        pass
+    return {"app_title": title, **extra}
+
+
 async def do_status(device: str) -> dict[str, Any]:
     async def act(dev: dict[str, Any]) -> dict[str, Any]:
         body = await _by_type(dev, adbops.status, webos.status)(dev)
@@ -140,7 +222,10 @@ async def do_status(device: str) -> dict[str, Any]:
             None,
         )
         body["app_id"] = app_id
-        body["app_title"] = appcache.app_title(app_id, title) if app_id else None
+        if body.get("adb_state", "device") == "device":
+            body |= await app_fields(dev, app_id, title)
+        else:
+            body["app_title"] = appcache.app_title(app_id, title) if app_id else None
         fast = {}
         if dev["type"] == "shield":
             if body.get("adb_state") == "device":
@@ -183,7 +268,7 @@ async def do_what_is_on(device: str) -> dict[str, Any]:
     async def act(dev: dict[str, Any]) -> dict[str, Any]:
         _require_adb(dev, "what_is_on")
         body = await adbops.what_is_on(dev)
-        body["app_title"] = appcache.app_title(body["app"]) if body["app"] else None
+        body |= await app_fields(dev, body["app"] or "")
         return body
 
     return await guarded(device, act, locked=False)
@@ -507,7 +592,7 @@ def _button(dev: dict[str, Any], key: str, teach: bool = True) -> str | None:
 
 def _open_words(dev: dict[str, Any], pkg: str, teach: bool = True) -> str:
     name = appcache.app_title(pkg)
-    name = "the app" if name == "Unknown app" else name
+    name = "the app" if name == pkg else name
     home, select = _button(dev, "HOME", teach), _button(dev, "SELECT", teach)
     if home and select:
         return (
@@ -928,8 +1013,12 @@ async def cached_list(
             return {"device": device, kind: [], "note": f"{kind} not available"}
     else:
         body = {}
-        legacy_labels = kind == "apps" and any(
-            a.get("title") == a.get("id") for a in entry["items"]
+        # A cache written before device labels held the package id as every title; an app with no
+        # readable label also shows its id, so only an all-id list counts as legacy.
+        legacy_labels = (
+            kind == "apps"
+            and bool(entry["items"])
+            and all(a.get("title") == a.get("id") for a in entry["items"])
         )
         if not appcache.is_fresh(entry) or (background and legacy_labels):
             _refresh_in_background(device)

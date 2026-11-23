@@ -10,6 +10,7 @@ import pytest
 import adbops
 import appcache
 import inventory
+import plexnow
 import sleeptimer
 import tools
 import webos
@@ -264,7 +265,7 @@ def test_friendly_titles_sort_and_upgrade_legacy_cache() -> None:
     assert [a["title"] for a in apps] == [
         "A device label",
         "Plex",
-        "Unknown app",
+        "unknown.id",
         "YouTube TV",
     ]
 
@@ -354,9 +355,51 @@ def test_foreground_uses_cached_label(monkeypatch: pytest.MonkeyPatch) -> None:
             }
         ),
     )
+    monkeypatch.setattr(adbops, "read", AsyncMock(return_value="null\n"))
+    monkeypatch.setattr(plexnow, "_fetch_sessions", list)
     body = run(tools.do_status("shield-a"))
     assert body["app_title"] == "Plex"
     assert body["app_id"] == "com.plexapp.android"
+    assert body["now_playing"] == "Plex open, nothing playing"
+
+
+def test_status_unlabelled_foreground_shows_package_not_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr(
+        adbops,
+        "status",
+        AsyncMock(
+            return_value={
+                "adb_state": "device",
+                "foreground": "mCurrentFocus=Window{abc u0 org.example.app/.Main}",
+            }
+        ),
+    )
+    monkeypatch.setattr(adbops, "read_label", AsyncMock(return_value=None))
+    body = run(tools.do_status("shield-a"))
+    assert body["app_title"] == "org.example.app"
+
+
+def test_status_uses_device_label_when_app_is_unlisted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr(
+        adbops,
+        "status",
+        AsyncMock(
+            return_value={
+                "adb_state": "device",
+                "foreground": "mCurrentFocus=Window{abc u0 org.example.app/.Main}",
+            }
+        ),
+    )
+    monkeypatch.setattr(adbops, "read_label", AsyncMock(return_value="Example App"))
+    assert run(tools.do_status("shield-a"))["app_title"] == "Example App"
 
 
 def test_webos_current_input_and_live_config_validation(
