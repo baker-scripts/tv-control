@@ -1674,8 +1674,6 @@ def verb_refusal(dev: dict[str, Any], verb: str) -> str | None:
         return f"unsupported_on_device: {dev['name']} has no 'sleep_timer' capability in devices.yml"
     if verb in ("set_input", "list_inputs"):
         return inputs_refusal(dev)
-    if verb == "send_text" and kind == "webos":
-        return "unsupported_on_device: text entry is Android only"
     return None
 
 
