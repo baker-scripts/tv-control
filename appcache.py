@@ -49,13 +49,10 @@ FALLBACK_LABELS = {
 
 
 def app_title(app_id: str, title: str | None = None) -> str:
-    """Curated name first, then the device's own label, then the bare package name."""
-    curated = FALLBACK_LABELS.get(app_id)
-    if curated:
-        return curated
+    """The device's own label first, then the curated name, then the bare package name."""
     if title and title.strip() and title != app_id and not title.startswith("@"):
         return title.strip()
-    return app_id
+    return FALLBACK_LABELS.get(app_id) or app_id
 
 
 def friendly_apps(items: list[dict[str, str]]) -> list[dict[str, str]]:

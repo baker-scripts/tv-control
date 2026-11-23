@@ -19,6 +19,7 @@ from PIL import Image as PillowImage
 
 import adbops
 import appcache
+import apppolicy
 import messages
 import plexnow
 import scan
@@ -27,10 +28,10 @@ import tvremote
 import webos
 from inventory import (
     DeviceError,
-    check_app_allowed,
     device_lock,
     get_device,
     is_active,
+    load_app_aliases,
     load_denied_apps,
     load_devices,
     load_message_policy,
@@ -409,16 +410,59 @@ async def do_remote_pair(device: str, code: str = "") -> dict[str, Any]:
     return await guarded(device, act)
 
 
+def _app_labels(dev: dict[str, Any], app_id: str) -> list[str | None]:
+    """Every name tv-control knows for an app on this device, from cache only (no device call)."""
+    entry = appcache.get(dev["name"], "apps") or {}
+    titles = [a.get("title") for a in entry.get("items", []) if a.get("id") == app_id]
+    return [
+        *titles,
+        appcache.FALLBACK_LABELS.get(app_id),
+        appcache.cached_label(dev["name"], app_id)[1],
+    ]
+
+
+async def check_app(dev: dict[str, Any], app: str) -> str:
+    """Resolve a spoken name or id to the device's package id, then apply the app policy.
+
+    Called before any device call by every verb that opens an app, on every device type and
+    path (agent or panel, forced or not). Raises DeviceError (AppRefusal) when refused.
+    """
+    entry = appcache.get(dev["name"], "apps") or {}
+    installed = [
+        {"id": str(a["id"]), "title": str(a.get("title") or a["id"])}
+        for a in entry.get("items", [])
+        if a.get("id")
+    ]
+    aliases = apppolicy.merged_aliases(await load_app_aliases(), dev)
+    app_id = apppolicy.resolve(dev, app, installed, aliases)
+    why = apppolicy.refusal(
+        dev, app_id, _app_labels(dev, app_id), await load_denied_apps()
+    )
+    if why:
+        raise apppolicy.AppRefusal(why)
+    return app_id
+
+
+async def launchable_apps(device: str, body: dict[str, Any]) -> dict[str, Any]:
+    """body with its apps list cut to what the app policy lets automation open on the device."""
+    try:
+        dev = await get_device(device)
+    except DeviceError:
+        return {**body, "apps": []}
+    apps = apppolicy.visible(dev, body.get("apps", []), await load_denied_apps())
+    return {**body, "apps": apps}
+
+
 async def do_launch(device: str, app: str) -> dict[str, Any]:
     async def act(dev: dict[str, Any]) -> dict[str, Any]:
         # Checked before any device call, on every device type.
-        check_app_allowed(app, await load_denied_apps())
+        app_id = await check_app(dev, app)
         if dev["type"] == "webos":
-            return await webos.launch(dev, app)
+            return await webos.launch(dev, app_id)
         target = (
             SHIELD_HOME_APP
-            if dev["type"] == "shield" and app in STOCK_LAUNCHERS
-            else app
+            if dev["type"] == "shield" and app_id in STOCK_LAUNCHERS
+            else app_id
         )
         return cast(
             dict[str, Any],
@@ -710,12 +754,12 @@ async def do_open_app(device: str, app: str, narrate: bool = False) -> dict[str,
     """Launch an Android app, then confirm through current_screen that it is in front."""
 
     async def act(dev: dict[str, Any]) -> dict[str, Any]:
-        check_app_allowed(app, await load_denied_apps())
         _require_adb(dev, "open_app")
+        app_id = await check_app(dev, app)
         target = (
             SHIELD_HOME_APP
-            if dev["type"] == "shield" and app in STOCK_LAUNCHERS
-            else app
+            if dev["type"] == "shield" and app_id in STOCK_LAUNCHERS
+            else app_id
         )
         adbops.check_pkg(target)
         woke = await _wake_first(dev)
@@ -908,7 +952,7 @@ async def do_play_title(
     async def act(dev: dict[str, Any]) -> dict[str, Any]:
         uri = plex_deep_link(machine_id, rating_key, view_offset_ms)
         _require_adb(dev, "play_title")
-        check_app_allowed(PLEX_PKG, await load_denied_apps())
+        await check_app(dev, PLEX_PKG)
         woke = await _wake_first(dev)
         return await _narrated(
             dev,
@@ -1122,9 +1166,12 @@ async def do_quick_apps(device: str) -> dict[str, Any]:
         return {"device": device, "apps": [], "refreshing": True}
     if not appcache.is_fresh(entry):
         _refresh_in_background(device)
-    apps = appcache.quick_apps(
-        entry["items"], await load_quick_apps(), await load_denied_apps()
-    )
+    denied = await load_denied_apps()
+    apps = appcache.quick_apps(entry["items"], await load_quick_apps(), denied)
+    try:
+        apps = apppolicy.visible(await get_device(device), apps, denied)
+    except DeviceError:
+        apps = []
     return {
         "device": device,
         "apps": apps,
@@ -1418,50 +1465,123 @@ def _opened_recently(device: str, focus: str) -> bool:
     return bool(pkg) and fresh and f" {pkg}/" in focus
 
 
-async def in_use_refusal(device: str, force: bool) -> dict[str, Any] | None:
+# Fire OS home screens; in front of them a Fire OS device is idle unless something plays.
+FIRE_LAUNCHER = "com.amazon.tv.launcher"
+HOME_APPS = {
+    "shield": frozenset({SHIELD_HOME_APP}),
+    "firetv": frozenset({SHIELD_HOME_APP, FIRE_LAUNCHER}),
+    "firestick": frozenset({SHIELD_HOME_APP, FIRE_LAUNCHER}),
+}
+
+
+async def _adb_busy(dev: dict[str, Any]) -> bool:
+    serial = await adbops.require_device(dev)
+    awake = adbops.is_awake(
+        await adbops.read(serial, "dumpsys power | grep mWakefulness=")
+    )
+    if not awake:
+        return False
+    playing = adbops.is_playing(
+        await adbops.read(serial, "dumpsys media_session | grep 'state=PlaybackState'")
+    )
+    focus = await adbops.read(serial, "dumpsys window | grep mCurrentFocus")
+    # Pause reads as not playing, so a device in any app outside its home screen counts too.
+    # TvOverlay's own screen (left open after setup) is not someone's app, and a Fire OS TV
+    # showing an HDMI input is judged by the device on that input (paired_tv), not here.
+    homes = HOME_APPS.get(dev["type"])
+    in_app = (
+        homes is not None
+        and not any(home in focus for home in homes)
+        and f" {adbops.OVERLAY_PKG}/" not in focus
+        and f" {adbops.PASSTHROUGH_PKG}/" not in focus
+    )
+    if not playing and not in_app:
+        return False
+    return bool(playing) or not _opened_recently(dev["name"], focus)
+
+
+async def device_busy(dev: dict[str, Any]) -> bool:
+    """True when someone may be watching dev. A read failure counts as not busy."""
+    try:
+        if dev["type"] == "webos":
+            # Playing or paused in the TV's media pipeline. An app with no media session
+            # (a menu, a store page) is not visible to this read.
+            return any(
+                state in webos.BUSY_PLAY_STATES
+                for state in await webos.play_states(dev)
+            )
+        if dev["type"] not in adbops.ADB_TYPES:
+            return False
+        return await _adb_busy(dev)
+    except DeviceError:
+        return False
+
+
+async def _busy_feeder(tv: str) -> str | None:
+    """The first active device whose paired_tv is tv and that someone may be watching."""
+    try:
+        devices = await load_devices()
+    except DeviceError:
+        return None
+    for dev in devices:
+        if dev.get("paired_tv") == tv and is_active(dev) and await device_busy(dev):
+            return str(dev["name"])
+    return None
+
+
+IN_USE_NEXT_STEP = (
+    "Do not test here. Pass force=true only when the operator asks for this command."
+)
+
+
+async def in_use_refusal(
+    device: str, force: bool, paired: bool = False
+) -> dict[str, Any] | None:
     """Stop an agent's command when someone may be watching. Panel presses never come here.
 
-    Adb read failures return None so the command reports its own device error.
+    paired=True (input switches and launches) also refuses while a device whose paired_tv is
+    this TV is playing or open in an app. Read failures return None so the command reports
+    its own device error.
     """
     if force:
         return None
     try:
         dev = await get_device(device)
-        # webOS is skipped on purpose: aiowebostv exposes only the foreground app id and
-        # power state, with no playback state, so no reliable "playing" signal exists.
-        if dev["type"] not in adbops.ADB_TYPES:
-            return None
-        serial = await adbops.require_device(dev)
-        awake = adbops.is_awake(
-            await adbops.read(serial, "dumpsys power | grep mWakefulness=")
-        )
-        if not awake:
-            return None
-        playing = adbops.is_playing(
-            await adbops.read(
-                serial, "dumpsys media_session | grep 'state=PlaybackState'"
-            )
-        )
-        focus = await adbops.read(serial, "dumpsys window | grep mCurrentFocus")
     except DeviceError:
         return None
-    # Pause reads as not playing, so a Shield in any app outside the launcher counts too.
-    # TvOverlay's own screen (left open after setup) is not someone's app.
-    in_app = (
-        dev["type"] == "shield"
-        and SHIELD_HOME_APP not in focus
-        and f" {adbops.OVERLAY_PKG}/" not in focus
-    )
-    if not playing and not in_app:
-        return None
-    if not playing and _opened_recently(device, focus):
-        return None
-    return {
-        "device": device,
-        "error": "in_use: someone may be watching this device",
-        "cause": "The device is awake and playing media or open in an app.",
-        "next_step": "Do not test here. Pass force=true only when the operator asks for this command.",
-    }
+    if await device_busy(dev):
+        return {
+            "device": device,
+            "error": "in_use: someone may be watching this device",
+            "cause": "The device is awake and playing media or open in an app.",
+            "next_step": IN_USE_NEXT_STEP,
+        }
+    feeder = await _busy_feeder(device) if paired else None
+    if feeder:
+        return {
+            "device": device,
+            "error": f"in_use: {feeder} on this TV may be in use",
+            "cause": f"{feeder} feeds this TV (paired_tv) and is playing media or open in an app.",
+            "next_step": IN_USE_NEXT_STEP,
+        }
+    return None
+
+
+async def write_gate(
+    device: str, force: bool, app: str | None = None, paired: bool = False
+) -> dict[str, Any] | None:
+    """The policy check before every agent write verb: the app policy (never skipped by force),
+    then the in-use refusal. Returns the refusal reply, or None to go ahead."""
+    if app is not None:
+        try:
+            await check_app(await get_device(device), app)
+        except apppolicy.AppRefusal as exc:
+            return {"device": device, **exc.body()}
+        except DeviceError:
+            pass  # The verb itself reports a lookup or inventory error.
+    if paired:
+        return await in_use_refusal(device, force, paired=True)
+    return await in_use_refusal(device, force)
 
 
 @mcp.tool()
@@ -1516,7 +1636,7 @@ async def send_key(
     expect_app (and optional expect_focus, matched against the focused view's text, description, or id)
     reads current_screen first and refuses with screen_mismatch. For key sequences use navigate."""
     return (
-        await in_use_refusal(device, force)
+        await write_gate(device, force)
         or await screen_guard(device, expect_app, expect_focus)
         or await do_key(device, key)
     )
@@ -1532,7 +1652,7 @@ async def navigate(
     force: bool = False,
 ) -> dict[str, Any]:
     """Send up to 10 comma-separated navigation keys (DPAD_*, OK, BACK, MEDIA_PLAY/PAUSE). current_screen is read before every key: expect_app must stay in front, and expect_focus (if set) must match the focused view before the first key; otherwise screen_mismatch and no further key. Returns the final screen."""
-    return await in_use_refusal(device, force) or await do_navigate(
+    return await write_gate(device, force) or await do_navigate(
         device, keys, expect_app, expect_focus, narrate
     )
 
@@ -1540,7 +1660,7 @@ async def navigate(
 @mcp.tool()
 async def send_text(device: str, text: str, force: bool = False) -> dict[str, Any]:
     """Type text into the focused field of an Android device: Remote v2 IME when paired, else adb input text."""
-    return await in_use_refusal(device, force) or await do_text(device, text)
+    return await write_gate(device, force) or await do_text(device, text)
 
 
 @mcp.tool()
@@ -1570,25 +1690,27 @@ async def list_inputs(device: str, refresh: bool = False) -> dict[str, Any]:
 @mcp.tool()
 async def set_input(device: str, input_id: str, force: bool = False) -> dict[str, Any]:
     """Switch an LG webOS TV to an explicit input id from list_inputs. There is no default input."""
-    return await in_use_refusal(device, force) or await do_set_input(device, input_id)
+    return await write_gate(device, force, paired=True) or await do_set_input(
+        device, input_id
+    )
 
 
 @mcp.tool()
 async def wake(device: str, force: bool = False) -> dict[str, Any]:
     """Wake an LG webOS TV with Wake-on-LAN sent from the site's LAN relay (devices.yml mac and wol_relay)."""
-    return await in_use_refusal(device, force) or await do_wake(device)
+    return await write_gate(device, force) or await do_wake(device)
 
 
 @mcp.tool()
 async def power(device: str, state: str, force: bool = False) -> dict[str, Any]:
     """Power a device on or off. Off is KEYCODE_SLEEP (standby) on ADB devices and power off on webOS."""
-    return await in_use_refusal(device, force) or await do_power(device, state)
+    return await write_gate(device, force) or await do_power(device, state)
 
 
 @mcp.tool()
 async def find_remote(device: str, force: bool = False) -> dict[str, Any]:
     """Make an NVIDIA Shield remote buzz (Remote Locator). Needs the find_remote capability in devices.yml."""
-    return await in_use_refusal(device, force) or await do_find_remote(device)
+    return await write_gate(device, force) or await do_find_remote(device)
 
 
 @mcp.tool()
@@ -1596,23 +1718,25 @@ async def sleep_timer(
     device: str, minutes: int = -1, force: bool = False
 ) -> dict[str, Any]:
     """Set a server-side sleep timer (15, 30, 60, or 90 min), cancel it (0), or read it (omit minutes)."""
-    return await in_use_refusal(device, force) or await do_sleep_timer(
+    return await write_gate(device, force) or await do_sleep_timer(
         device, None if minutes < 0 else minutes
     )
 
 
 @mcp.tool()
 async def launch_app(device: str, app: str, force: bool = False) -> dict[str, Any]:
-    """Launch an app by Android package name or webOS app id (see list_apps)."""
-    return await in_use_refusal(device, force) or await do_launch(device, app)
+    """Launch an app by package id, webOS app id, or name (see list_apps). A name resolves by exact label, id, app_aliases, then unique prefix; ambiguous_app or unknown_app returns candidates. denied_apps, allowed_apps, and protected targets (stores, Settings, sign-in) are refused even with force=true."""
+    return await write_gate(device, force, app=app, paired=True) or await do_launch(
+        device, app
+    )
 
 
 @mcp.tool()
 async def open_app(
     device: str, app: str, narrate: bool = False, force: bool = False
 ) -> dict[str, Any]:
-    """Launch an Android app by package name, then confirm it is in front (error not_confirmed otherwise). narrate=true shows the assistant intro and how a person does it first."""
-    return await in_use_refusal(device, force) or await do_open_app(
+    """Launch an Android app by package id or name (resolved as in launch_app, same app policy), then confirm it is in front (error not_confirmed otherwise). narrate=true shows the assistant intro and how a person does it first."""
+    return await write_gate(device, force, app=app, paired=True) or await do_open_app(
         device, app, narrate
     )
 
@@ -1622,7 +1746,7 @@ async def go_home(
     device: str, narrate: bool = False, force: bool = False
 ) -> dict[str, Any]:
     """Go to the home screen: Projectivy on a Shield (confirmed in front), the HOME key on Fire OS. narrate=true shows the steps first."""
-    return await in_use_refusal(device, force) or await do_go_home(device, narrate)
+    return await write_gate(device, force) or await do_go_home(device, narrate)
 
 
 @mcp.tool()
@@ -1635,9 +1759,9 @@ async def play_title(
     view_offset_ms: int = 0,
 ) -> dict[str, Any]:
     """Play a Plex title by deep link (server machineIdentifier and ratingKey); confirms Plex's media session plays. view_offset_ms starts it at that point (0 keeps Plex's own choice). narrate=true shows the steps first."""
-    return await in_use_refusal(device, force) or await do_play_title(
-        device, machine_id, rating_key, narrate, view_offset_ms
-    )
+    return await write_gate(
+        device, force, app=PLEX_PKG, paired=True
+    ) or await do_play_title(device, machine_id, rating_key, narrate, view_offset_ms)
 
 
 @mcp.tool()
@@ -1645,7 +1769,7 @@ async def narrate(
     device: str, steps: str, speak: bool = False, force: bool = False
 ) -> dict[str, Any]:
     """Show "Hi, this is <messages.assistant.name>. I will navigate now." and then each step (separated by |) on screen. speak=true reports that speech is not available."""
-    return await in_use_refusal(device, force) or await do_narrate(device, steps, speak)
+    return await write_gate(device, force) or await do_narrate(device, steps, speak)
 
 
 @mcp.tool()
@@ -1676,7 +1800,7 @@ async def toast(
 @mcp.tool()
 async def reboot(device: str, force: bool = False) -> dict[str, Any]:
     """Reboot an ADB device (plain reboot, never power-off). To turn a Shield off, send_key SLEEP."""
-    return await in_use_refusal(device, force) or await do_reboot(device)
+    return await write_gate(device, force) or await do_reboot(device)
 
 
 @mcp.tool()

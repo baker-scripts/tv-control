@@ -103,6 +103,30 @@ async def call[T](dev: dict[str, Any], fn: Callable[[WebOsClient], Awaitable[T]]
     raise AssertionError("unreachable")
 
 
+# com.webos.media/getForegroundAppInfo playState values that mean someone is watching
+# (aiowebostv get_media_foreground_app; Home Assistant's webostv maps them to playing/paused).
+BUSY_PLAY_STATES = frozenset({"playing", "paused"})
+PLAY_STATE_TIMEOUT_S = 5
+
+
+async def play_states(dev: dict[str, Any]) -> list[str]:
+    """playState of each media pipeline in front; [] when unpaired, off, or unreadable.
+
+    One bounded attempt, no reconnect: the in-use check runs before every agent command and an
+    off TV must not stall it.
+    """
+    key = read_keys().get(dev["name"])
+    if not key:
+        return []
+    try:
+        async with asyncio.timeout(PLAY_STATE_TIMEOUT_S):
+            async with client(dev, key, PLAY_STATE_TIMEOUT_S) as tv:
+                info = await tv.get_media_foreground_app()
+    except Exception:  # noqa: BLE001 - aiowebostv raises aiohttp, pairing, and command errors
+        return []
+    return [str(entry.get("playState", "")) for entry in info]
+
+
 async def status(dev: dict[str, Any]) -> dict[str, Any]:
     if not is_paired(dev["name"]):
         return {
