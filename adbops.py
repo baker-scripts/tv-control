@@ -878,38 +878,16 @@ async def read_label(serial: str, pkg: str, pull_timeout: float = 90) -> str | N
     return None
 
 
-# A Fire OS TV pulls one launcher APK in about 20 s over Wi-Fi ADB (some take over 60 s), so labels are
-# read a few at a time, cached per device, and never awaited past the budget.
+# A Fire OS TV pulls one launcher APK in about 20 s over Wi-Fi ADB (some take over 60 s), so labels
+# are cached per device and no new pull starts after the budget; the next call finishes the rest.
 LIST_APPS_BUDGET_S = 20
 LABEL_JOB_PULL_S = 45
-LABEL_CONCURRENCY = 3
-_label_jobs: dict[tuple[str, str], "asyncio.Task[str | None]"] = {}
-_label_slots: dict[str, asyncio.Semaphore] = {}
-
-
-async def _label_fetch(name: str, serial: str, pkg: str) -> str | None:
-    slots = _label_slots.setdefault(serial, asyncio.Semaphore(LABEL_CONCURRENCY))
-    async with slots:
-        label = await read_label(serial, pkg, pull_timeout=LABEL_JOB_PULL_S)
-    appcache.put_label(name, pkg, label)
-    return label
-
-
-def _label_job(name: str, serial: str, pkg: str) -> "asyncio.Task[str | None]":
-    """One pull per package at a time; it outlives a call that gave up waiting and fills the label cache."""
-    key = (serial, pkg)
-    job = _label_jobs.get(key)
-    if job is None:
-        job = asyncio.get_running_loop().create_task(_label_fetch(name, serial, pkg))
-        _label_jobs[key] = job
-        job.add_done_callback(lambda _t: _label_jobs.pop(key, None))
-    return job
 
 
 async def list_apps(
     dev: dict[str, Any], budget_s: float = LIST_APPS_BUDGET_S
 ) -> tuple[list[dict[str, str]], bool]:
-    """(apps, partial). partial is True when some labels were still being read at the budget; those apps show their curated name or package id until a later call finds the label cached."""
+    """(apps, partial). partial is True when the budget ran out before every label was read; the rest show their curated name or package id until a later call."""
     serial = await require_device(dev)
     pkgs: set[str] = set()
     for category in ("LEANBACK_LAUNCHER", "LAUNCHER"):
@@ -920,22 +898,16 @@ async def list_apps(
         )
         pkgs |= {ln.split("/")[0].strip() for ln in text.splitlines() if "/" in ln}
     titles: dict[str, str | None] = {}
-    waiting: dict[str, asyncio.Task[str | None]] = {}
+    partial = False
+    deadline = time.monotonic() + budget_s
     for pkg in sorted(p for p in pkgs if PKG_RE.match(p)):
         known, label = appcache.cached_label(dev["name"], pkg)
-        if known:
-            titles[pkg] = label
-        else:
-            waiting[pkg] = _label_job(dev["name"], serial, pkg)
-    if waiting:
-        await asyncio.wait(waiting.values(), timeout=budget_s)
-    partial = False
-    for pkg, job in waiting.items():
-        if job.done() and not job.cancelled() and job.exception() is None:
-            titles[pkg] = job.result()
-        else:
-            titles[pkg] = None
+        if not known and time.monotonic() < deadline:
+            label = await read_label(serial, pkg, pull_timeout=LABEL_JOB_PULL_S)
+            appcache.put_label(dev["name"], pkg, label)
+        elif not known:
             partial = True
+        titles[pkg] = label
     apps = [{"id": p, "title": appcache.app_title(p, t)} for p, t in titles.items()]
     return appcache.friendly_apps(apps), partial
 
