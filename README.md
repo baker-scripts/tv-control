@@ -120,7 +120,7 @@ curl -sS -X POST "http://<TS_IP>:8012/message" -H "Authorization: Bearer $TV_CON
 | `current_screen` | Read-only: app and activity in front, focus window, wakefulness, media sessions, and the focused view. `focus=false` skips the `uiautomator` dump. |
 | `what_is_on` | Read-only: app in front, playback state, and the media-session title. |
 | `open_app`, `go_home` | Wake the device if needed, act, then confirm the app in front (`not_confirmed` otherwise). `go_home` opens Projectivy on a Shield and presses HOME on Fire OS. |
-| `play_title` | Plex deep link from a server `machine_id` and a `rating_key`, then wait for Plex's media session to play. tv-control holds no Plex token. |
+| `play_title` | Plex deep link from a server `machine_id` and a `rating_key`, then wait for Plex's media session to play. An optional `view_offset_ms` adds `viewOffset` to the link so playback starts at that point. tv-control holds no Plex token. |
 | `navigate` | Up to 10 keys; checks `expect_app` (and `expect_focus` before the first key) before every key and stops with `screen_mismatch`. |
 | `narrate` | Shows the intro, then each `|`-separated step, 6 s apart, at the device's narration depth. |
 
