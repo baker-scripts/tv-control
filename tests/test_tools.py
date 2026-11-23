@@ -553,6 +553,13 @@ def test_panel_card_has_timer_presets_and_touch_layout() -> None:
     css = (panel.STATIC / "panel.css").read_text()
     assert "min-height:48px" in css and "viewport" in panel.PAGE
     assert "prefers-color-scheme:dark" in css
+    assert (
+        "data-theme=oled" in css and "--bg:#000;" in css.split("data-theme=oled", 1)[1]
+    )
+    assert (
+        'id="theme-toggle"' in panel.PAGE
+        and "tv-theme" in (panel.STATIC / "panel.js").read_text()
+    )
     assert 'class="sheet"' in card and "text-count" in card
     for phrase in ("youtube", "@gmail.com", ".com"):
         assert f'data-chip="{phrase}"' in card

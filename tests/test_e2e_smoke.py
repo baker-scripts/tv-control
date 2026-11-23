@@ -123,6 +123,26 @@ def test_panel_has_no_netflix_and_no_horizontal_overflow(
     context.close()
 
 
+def test_oled_black_toggle_persists(server: str, browser: Browser) -> None:
+    context = browser.new_context(
+        viewport={"width": 375, "height": 812}, extra_http_headers=HEADERS
+    )
+    page = context.new_page()
+    page.goto(server + "/")
+    page.wait_for_selector(".device")
+    bg = "document.body && getComputedStyle(document.body).backgroundColor"
+    assert page.evaluate(bg) != "rgb(0, 0, 0)"
+    page.click("#theme-toggle")
+    assert page.evaluate(bg) == "rgb(0, 0, 0)"
+    page.reload()
+    page.wait_for_selector(".device")
+    assert page.get_attribute("#theme-toggle", "aria-pressed") == "true"
+    assert page.evaluate(bg) == "rgb(0, 0, 0)"
+    page.click("#theme-toggle")
+    assert page.evaluate(bg) != "rgb(0, 0, 0)"
+    context.close()
+
+
 def test_now_on_in_use_notice_and_build_footer(server: str, browser: Browser) -> None:
     context = browser.new_context(
         viewport={"width": 375, "height": 812}, extra_http_headers=HEADERS
