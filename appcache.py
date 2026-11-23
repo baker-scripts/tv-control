@@ -12,6 +12,8 @@ from typing import Any
 
 CACHE_FILE = Path(os.environ.get("APP_CACHE_FILE", "/config/app-cache.json"))
 TTL_S = 24 * 3600
+# A partial app list (some labels unread) is refreshed soon so the labels fill in.
+PARTIAL_TTL_S = 300
 LABEL_MISS_RETRY_S = 3600
 
 FALLBACK_LABELS = {
@@ -74,11 +76,18 @@ def get(device: str, kind: str) -> dict[str, Any] | None:
     return (_read().get(device) or {}).get(kind)
 
 
-def put(device: str, kind: str, items: list[Any], now: float | None = None) -> None:
+def put(
+    device: str,
+    kind: str,
+    items: list[Any],
+    now: float | None = None,
+    partial: bool = False,
+) -> None:
     data = _read()
     data.setdefault(device, {})[kind] = {
         "items": items,
         "fetched_at": time.time() if now is None else now,
+        **({"partial": True} if partial else {}),
     }
     _write(data)
 
@@ -114,7 +123,8 @@ def put_label(
 
 
 def is_fresh(entry: dict[str, Any], now: float | None = None) -> bool:
-    return bool((time.time() if now is None else now) - entry["fetched_at"] < TTL_S)
+    ttl = PARTIAL_TTL_S if entry.get("partial") else TTL_S
+    return bool((time.time() if now is None else now) - entry["fetched_at"] < ttl)
 
 
 def quick_apps(

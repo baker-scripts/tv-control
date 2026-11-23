@@ -990,13 +990,15 @@ async def do_play_title(
     return await guarded(device, act)
 
 
-async def _live_lists(dev: dict[str, Any]) -> dict[str, list[Any]]:
+async def _live_lists(dev: dict[str, Any]) -> tuple[dict[str, list[Any]], bool]:
+    """(lists, partial): partial when an ADB app list left some labels unread."""
     if dev["type"] == "webos":
         return {
             "apps": await webos.list_apps(dev),
             "inputs": await webos.list_inputs(dev),
-        }
-    return {"apps": await _by_type(dev, adbops.list_apps, None)(dev)}
+        }, False
+    apps, partial = await _by_type(dev, adbops.list_apps, None)(dev)
+    return {"apps": apps}, partial
 
 
 _refreshing: set[str] = set()
@@ -1014,12 +1016,12 @@ async def refresh_lists(device: str) -> dict[str, Any]:
     async def act(dev: dict[str, Any]) -> dict[str, Any]:
         # Own lock: one refresh per device, and commands never queue behind its APK pulls.
         async with device_lock(f"refresh:{device}"):
-            lists = await _live_lists(dev)
+            lists, partial = await _live_lists(dev)
             for kind, items in lists.items():
                 if kind == "apps":
                     items = appcache.friendly_apps(items)
-                appcache.put(device, kind, items)
-        return {"refreshed": sorted(lists)}
+                appcache.put(device, kind, items, partial=partial and kind == "apps")
+        return {"refreshed": sorted(lists), **({"partial": True} if partial else {})}
 
     return await guarded(device, act, locked=False)
 
@@ -1087,6 +1089,7 @@ async def cached_list(
         "fetched_at": entry["fetched_at"],
         "age_s": age,
         "stale": not appcache.is_fresh(entry),
+        **({"partial": True} if entry.get("partial") else {}),
         **body,
     }
 

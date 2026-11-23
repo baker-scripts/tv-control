@@ -293,7 +293,7 @@ def test_android_label_reads_apk_without_install(
     monkeypatch.setattr(
         adbops.asyncio, "to_thread", AsyncMock(side_effect=lambda fn, *args: fn(*args))
     )
-    assert run(adbops.app_label("mock", "example.app")) == "Example TV"
+    assert run(adbops.read_label("mock", "example.app")) == "Example TV"
     assert calls[0][:2] == ("pull", "/data/app/example/base.apk")
 
 
@@ -303,7 +303,8 @@ def test_android_label_failure_uses_curated_fallback(
     from unittest.mock import AsyncMock
 
     monkeypatch.setattr(adbops, "shell", AsyncMock(side_effect=DeviceError("offline")))
-    assert run(adbops.app_label("mock", "com.plexapp.android")) == "Plex"
+    assert run(adbops.read_label("mock", "com.plexapp.android")) is None
+    assert appcache.app_title("com.plexapp.android", None) == "Plex"
 
 
 def test_configured_inputs_override_labels_and_flag_unknown(
@@ -887,9 +888,9 @@ def test_shield_wake_sends_wakeup(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_app_refresh_does_not_block_launch(monkeypatch: pytest.MonkeyPatch) -> None:
     release = asyncio.Event()
 
-    async def slow_lists(dev: dict[str, Any]) -> dict[str, Any]:
+    async def slow_lists(dev: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         await release.wait()
-        return {"apps": []}
+        return {"apps": []}, False
 
     async def fake_launch(dev: dict[str, Any], pkg: str) -> dict[str, Any]:
         return {"launched": pkg}

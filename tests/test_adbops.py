@@ -396,7 +396,10 @@ def test_clean_toast_and_toast(monkeypatch: pytest.MonkeyPatch) -> None:
         go(adbops.toast(SHIELD, "hello"))
 
 
-def test_app_label_and_list_apps(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_app_label_and_list_apps(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(appcache, "CACHE_FILE", tmp_path / "cache.json")
     pkg = "org.example.app"
     install(
         monkeypatch,
@@ -407,12 +410,10 @@ def test_app_label_and_list_apps(monkeypatch: pytest.MonkeyPatch) -> None:
             "pull": (1, b"", "no"),
         },
     )
-    assert go(adbops.app_label("s", pkg)) == appcache.app_title(pkg)
-    assert go(adbops.app_label("s", "not a package")) == appcache.app_title(
-        "not a package"
-    )
-    apps = go(adbops.list_apps(SHIELD))
+    assert go(adbops.read_label("s", pkg)) is None
+    apps, partial = go(adbops.list_apps(SHIELD))
     assert [a["id"] for a in apps] == [pkg]
+    assert partial is False
 
 
 def test_app_label_uses_apk_name(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -421,9 +422,8 @@ def test_app_label_uses_apk_name(monkeypatch: pytest.MonkeyPatch) -> None:
         {"pm path": ok("package:/data/app/x/base.apk\n"), "pull": ok("1 file pulled")},
     )
     monkeypatch.setattr(adbops, "apk_label", lambda _path: "Pretty Name")
-    assert go(adbops.app_label("s", "org.example.app")) == appcache.app_title(
-        "org.example.app", "Pretty Name"
-    )
+    assert go(adbops.read_label("s", "org.example.app")) == "Pretty Name"
+    assert appcache.app_title("org.example.app", "Pretty Name")
 
 
 def test_save_undo_writes_state(

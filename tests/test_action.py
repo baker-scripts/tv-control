@@ -107,7 +107,10 @@ def isolated(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> list[tuple[str, 
     async def no_apps(dev: dict[str, Any]) -> list[dict[str, str]]:
         return []
 
-    monkeypatch.setattr(adbops, "list_apps", no_apps)
+    async def no_adb_apps(dev: dict[str, Any]) -> tuple[list[dict[str, str]], bool]:
+        return [], False
+
+    monkeypatch.setattr(adbops, "list_apps", no_adb_apps)
     monkeypatch.setattr(webos, "list_apps", no_apps)
     monkeypatch.setattr(adbops, "list_inputs", android_inputs)
     monkeypatch.setattr(webos, "list_inputs", webos_inputs)
