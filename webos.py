@@ -12,6 +12,7 @@ from typing import Any, cast
 import aiohttp
 from aiowebostv import WebOsClient
 
+import inputs
 from inventory import DeviceError, load_sites, run
 
 WEBOS_KEYS_FILE = Path(os.environ.get("WEBOS_KEYS_FILE", "/config/webos-keys.json"))
@@ -273,19 +274,13 @@ async def list_apps(dev: dict[str, Any]) -> list[dict[str, str]]:
     )
 
 
-async def list_inputs(dev: dict[str, Any]) -> list[dict[str, str]]:
+async def list_inputs(dev: dict[str, Any]) -> list[dict[str, Any]]:
+    """The TV's external inputs (ssap tv/getExternalInputList), named by label, port, and CEC device."""
+
     async def read(tv: WebOsClient) -> list[dict[str, Any]]:
         return cast(list[dict[str, Any]], await tv.get_inputs() or [])
 
-    inputs = await call(dev, read)
-    return [
-        {
-            "id": i["id"],
-            "label": str(i.get("label", i["id"])),
-            "appId": str(i.get("appId", "")),
-        }
-        for i in inputs
-    ]
+    return inputs.from_webos(await call(dev, read))
 
 
 async def audio_settings(dev: dict[str, Any]) -> dict[str, Any]:
