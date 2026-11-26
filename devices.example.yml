@@ -11,6 +11,9 @@
 #   for TVs whose passthrough intent opens the wrong screen. Neither wakes the TV.
 # input_aliases: spoken name -> input id or another name ("cable box": HDMI_2).
 # tailnet_ip: a second address tried after ip and before tailnet_fqdn.
+# volume_via: ha_remote (with ha_remote: {entity: remote.soundbar, commands: {up: .., down: .., mute: ..}, device: ..})
+#   sends volume through Home Assistant remote.send_command; needs HA_URL and HA_TOKEN in the app environment.
+# favorites: panel one-tap buttons ({kind: app|input|sleep, ...}); unset uses Plex, YouTube, SmartTube, and a 30 min timer.
 # household: groups TVs for the message policy (messages.narration.households, assistant replies).
 # narration: every_step | start_end | off; overrides the household's narration depth for one device.
 devices:

@@ -74,6 +74,9 @@ See [`devices.example.yml`](devices.example.yml). Keep the real file outside thi
 | `devices[].narration` | `every_step`, `start_end`, or `off`; overrides the household's narration depth. |
 | `devices[].overlay_port` | TvOverlay REST port on the device (default 5001). |
 | `devices[].volume_via` | Name of a webOS TV that takes this device's volume and mute keys. |
+| `devices[].volume_via: ha_remote` | Send volume and mute through Home Assistant `remote.send_command` instead. Needs the `ha_remote` block and `HA_URL` plus `HA_TOKEN` in the environment. A missing entity or unset env returns an error and never falls back to another route. |
+| `devices[].ha_remote` | `entity` (`remote.<name>`), `commands` (`up`, `down`, `mute`: the learned command names), optional `device` (the learned device name). |
+| `devices[].favorites` | One-tap panel buttons: a list of `{kind: app, app: <id>, label}`, `{kind: input, input: <id>, label}`, or `{kind: sleep, minutes: 15/30/60/90}`. Unset gives Plex, YouTube, SmartTube (when installed) and a 30 min timer; `[]` hides the row. Buttons press the panel's own open, input, and sleeptimer routes, so the in-use guard and app policy still apply. Netflix is never offered. |
 | `devices[].capabilities` | Any of `find_remote`, `wake`, `power`, `inputs`, `sleep_timer`. |
 | `devices[].label`, `mac`, `tv_control`, `status` | Display name, WoL MAC, `best-effort` CEC, `pending` (skipped until it has an address). |
 | `devices[].inputs` | Optional input key to button label, for example `HDMI_1: Shield`. The key and label become names for the input the device lists; a key the device does not list is shown with an error and refused. |

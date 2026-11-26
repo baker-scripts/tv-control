@@ -227,7 +227,46 @@ async def status(dev: dict[str, Any]) -> dict[str, Any]:
     pkg = await read(serial, f"dumpsys package {SMARTTUBE_PKG} | grep versionName")
     match = re.search(r"versionName=(\S+)", pkg)
     body["smarttube_version"] = match.group(1) if match else None
+    body["ip_alert"] = await ip_alert(dev, serial)
     return body
+
+
+LAN_READ = "ip -4 -o addr show"
+INET_RE = re.compile(r"\binet (\d{1,3}(?:\.\d{1,3}){3})/")
+ADDR_TTL_S = 120.0
+_addrs: dict[str, tuple[float, list[str]]] = {}
+
+
+def lan_addresses(text: str) -> list[str]:
+    """IPv4 addresses the device holds, less loopback and the tailnet range."""
+    found = []
+    for addr in INET_RE.findall(text):
+        a, b = (int(x) for x in addr.split(".")[:2])
+        if a == 127 or (a == 100 and 64 <= b <= 127):
+            continue
+        found.append(addr)
+    return found
+
+
+async def ip_alert(dev: dict[str, Any], serial: str) -> str | None:
+    """Why devices.yml ip is stale: the device holds other LAN addresses, or only a fallback path answered."""
+    configured = str(dev.get("ip") or "")
+    if not configured:
+        return None
+    cached = _addrs.get(dev["name"])
+    if cached is None or time.monotonic() - cached[0] > ADDR_TTL_S:
+        try:
+            held = lan_addresses(await read(serial, LAN_READ))
+        except DeviceError:
+            held = []
+        cached = _addrs[dev["name"]] = (time.monotonic(), held)
+    held = cached[1]
+    if held and configured not in held:
+        return f"answered at {', '.join(held)}; devices.yml says {configured}"
+    host = serial.rsplit(":", 1)[0]
+    if host != configured:
+        return f"LAN address {configured} is not answering; reached via {host}"
+    return None
 
 
 PASSTHROUGH_PKG = "com.amazon.tv.inputpreference.service"
