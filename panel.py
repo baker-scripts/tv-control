@@ -316,7 +316,7 @@ def _card(dev: dict[str, Any], admin: bool = True) -> str:
 <div class="device-heading"><div><h1>{name}</h1><p class="connection">Checking connection…</p><p class="paths muted"></p>{badge}</div><span class="device-type">{html.escape(dev.get("type", ""))}</span></div>
 <p class="offline-note" hidden></p>
 <div class="now" aria-live="polite"><p class="now-label">On now</p><p class="foreground">Looking for the current app…</p></div>
-<div class="notice" role="alert" hidden><p></p><div class="row"><button type="button" class="anyway">Do it anyway</button><button type="button" class="notice-cancel">Cancel</button></div></div>
+<dialog class="notice" aria-label="Someone may be watching"><p></p><div class="row"><button type="button" class="anyway">Do it anyway</button><button type="button" class="notice-cancel" autofocus>Cancel</button></div></dialog>
 {preview}{banner}
 <p class="timer-status">Sleep timer · <span class="countdown" role="timer">Off</span></p>
 <div class="row power"><button data-act="home">Home</button><button data-act="power-on">On</button><button data-act="power-off" class="danger">Power off</button>{find}</div>

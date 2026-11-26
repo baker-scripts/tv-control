@@ -747,7 +747,7 @@ def test_card_has_now_on_one_tap_actions_message_and_notice() -> None:
     assert 'class="now"' in card and 'aria-live="polite"' in card
     assert 'data-act="home"' in card
     assert card.index('class="message-form') < card.index('<details class="tools">')
-    assert 'class="notice"' in card and "Do it anyway" in card
+    assert '<dialog class="notice"' in card and "Do it anyway" in card
     assert 'class="offline-note"' in card
 
 
