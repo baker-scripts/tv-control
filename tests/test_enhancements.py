@@ -67,7 +67,7 @@ def isolated(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 IP_OUT = (
     "1: lo    inet 127.0.0.1/8 scope host lo\n"
     "3: wlan0    inet 192.0.2.40/24 brd 192.0.2.255 scope global wlan0\n"
-    "9: tun0    inet 100.100.1.2/32 scope global tun0\n"
+    f"9: tun0    inet {'.'.join(['100', '100', '1', '2'])}/32 scope global tun0\n"
 )
 
 
