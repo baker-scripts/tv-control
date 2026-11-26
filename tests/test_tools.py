@@ -978,6 +978,47 @@ def test_opened_grace_never_covers_playback_another_app_or_expiry(
     assert "in_use" in run(tools.in_use_refusal("shield-a", False))["error"]
 
 
+def _fake_launch(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_launch(dev: dict[str, Any], pkg: str) -> dict[str, Any]:
+        return {"launched": pkg}
+
+    monkeypatch.setattr(adbops, "launch", fake_launch)
+
+
+def test_launch_app_then_send_key_and_text_pass_within_grace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(tools, "_opened", {})
+    _fake_launch(monkeypatch)
+    _device_reads(monkeypatch, PLEX_FOCUS, "2")
+    run(tools.do_launch("shield-a", "com.plexapp.android"))
+
+    async def fake_key(dev: dict[str, Any], key: str) -> dict[str, Any]:
+        return {"sent": key}
+
+    async def fake_text(dev: dict[str, Any], text: str) -> dict[str, Any]:
+        return {"typed": text}
+
+    monkeypatch.setattr(adbops, "send_key", fake_key)
+    monkeypatch.setattr(adbops, "send_key_fast", fake_key)
+    monkeypatch.setattr(adbops, "send_text", fake_text)
+    assert "error" not in run(tools.send_key("shield-a", "DPAD_UP"))
+    assert "error" not in run(tools.send_text("shield-a", "hello"))
+
+
+def test_launch_app_grace_never_covers_playback_or_expiry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(tools, "_opened", {})
+    _fake_launch(monkeypatch)
+    run(tools.do_launch("shield-a", "com.plexapp.android"))
+    _device_reads(monkeypatch, PLEX_FOCUS, "3")
+    assert "in_use" in run(tools.in_use_refusal("shield-a", False))["error"]
+    _device_reads(monkeypatch, PLEX_FOCUS, "2")
+    monkeypatch.setattr(tools, "OPENED_GRACE_S", 0)
+    assert "in_use" in run(tools.in_use_refusal("shield-a", False))["error"]
+
+
 @pytest.mark.parametrize(
     ("name", "call"),
     [

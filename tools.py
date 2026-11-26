@@ -468,10 +468,12 @@ async def do_launch(device: str, app: str) -> dict[str, Any]:
             if dev["type"] == "shield" and app_id in STOCK_LAUNCHERS
             else app_id
         )
-        return cast(
+        launched = cast(
             dict[str, Any],
             await _by_type(dev, adbops.launch, None)(dev, adbops.check_pkg(target)),
         )
+        note_opened(dev["name"], target)
+        return launched
 
     return await guarded(device, act)
 
