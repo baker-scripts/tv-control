@@ -67,6 +67,7 @@ USER_GET_VERBS = frozenset(
         "apps",
         "inputs",
         "quickapps",
+        "favorites",
         "sleeptimer",
         "whatison",
         "messages",
@@ -314,9 +315,11 @@ def _card(dev: dict[str, Any], admin: bool = True) -> str:
     msg_id = "msg-" + re.sub(r"[^a-z0-9]", "-", dev["name"].lower())
     return f"""<section class="device" data-dev="{name}" data-type="{html.escape(dev.get("type", ""))}" data-state="loading" aria-busy="true" hidden>
 <div class="device-heading"><div><h1>{name}</h1><p class="connection">Checking connection…</p><p class="paths muted"></p>{badge}</div><span class="device-type">{html.escape(dev.get("type", ""))}</span></div>
+<p class="reach-alert" role="alert" hidden>Can't reach this TV</p><p class="ip-alert" role="alert" hidden></p>
 <p class="offline-note" hidden></p>
 <div class="now" aria-live="polite"><p class="now-label">On now</p><p class="foreground">Looking for the current app…</p></div>
-<dialog class="notice" aria-label="Someone may be watching"><p></p><div class="row"><button type="button" class="anyway">Do it anyway</button><button type="button" class="notice-cancel" autofocus>Cancel</button></div></dialog>
+<div class="row favorites" aria-label="Favorites" hidden></div>
+<dialog class="notice" aria-label="Someone may be watching"><p></p><p class="notice-now"></p><div class="row"><button type="button" class="anyway">Do it anyway</button><button type="button" class="notice-cancel" autofocus>Cancel</button></div></dialog>
 {preview}{banner}
 <p class="timer-status">Sleep timer · <span class="countdown" role="timer">Off</span></p>
 <div class="row power"><button data-act="home">Home</button><button data-act="power-on">On</button><button data-act="power-off" class="danger">Power off</button>{find}</div>
@@ -378,6 +381,8 @@ async def api_get(request: Request) -> Response:
         return JSONResponse(await tools.do_list_inputs(name, refresh, background=True))
     if what == "quickapps":
         return JSONResponse(await tools.do_quick_apps(name))
+    if what == "favorites":
+        return JSONResponse(await tools.do_favorites(name))
     if what == "sleeptimer":
         return JSONResponse(await tools.do_sleep_timer(name))
     if what == "messages":

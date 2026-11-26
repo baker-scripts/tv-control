@@ -44,6 +44,15 @@ DEVICES = [
         "capabilities": ["wake", "power", "inputs"],
     },
 ]
+DEVICES.append(
+    {
+        "name": "gone-tv",
+        "type": "firetv",
+        "site": "home",
+        "ip": "192.0.2.3",
+        "capabilities": ["sleep_timer"],
+    }
+)
 VIEWPORTS = {"phone": (375, 812), "desktop": (1280, 800)}
 
 
@@ -53,8 +62,30 @@ def server() -> Iterator[str]:
     mp.setattr(panel, "PROXY_KEY", PROXY_KEY)
     mp.setattr(panel, "load_devices", AsyncMock(return_value=DEVICES))
     ok: Any = AsyncMock(return_value={"adb_state": "device", "foreground": "home"})
+
+    async def status(name: str) -> dict[str, Any]:
+        if name == "gone-tv":
+            return {"adb_state": "offline"}
+        if name == "shield-a":
+            return {
+                "adb_state": "device",
+                "foreground": "home",
+                "ip_alert": "answered at 192.0.2.40; devices.yml says 192.0.2.1",
+            }
+        return {"adb_state": "device", "foreground": "home"}
+
+    mp.setattr(panel.tools, "do_status", status)
+
+    async def favorites(name: str) -> dict[str, Any]:
+        found = [
+            {"kind": "app", "app": "com.plexapp.android", "label": "Plex"},
+            {"kind": "app", "app": "com.netflix.ninja", "label": "Netflix"},
+            {"kind": "sleep", "minutes": 30, "label": "Sleep 30 min"},
+        ]
+        return {"device": name, "favorites": found if name == "shield-a" else []}
+
+    mp.setattr(panel.tools, "do_favorites", favorites)
     for verb in (
-        "do_status",
         "do_health",
         "do_list_apps",
         "do_quick_apps",
@@ -163,4 +194,65 @@ def test_now_on_in_use_notice_and_build_footer(server: str, browser: Browser) ->
     notice.locator(".anyway").click()
     page.locator("#snackbar", has_text="The home screen is showing.").wait_for()
     assert "built" in page.inner_text("#build")
+    context.close()
+
+
+def test_cant_reach_and_wrong_ip_alerts(server: str, browser: Browser) -> None:
+    context = browser.new_context(
+        viewport={"width": 375, "height": 812}, extra_http_headers=HEADERS
+    )
+    page = context.new_page()
+    page.goto(server + "/#device=gone-tv")
+    gone = page.locator('.device[data-dev="gone-tv"]')
+    gone.locator(".reach-alert").wait_for(state="visible")
+    assert "Can't reach" in gone.locator(".reach-alert").inner_text()
+    assert gone.locator(".ip-alert").is_hidden()
+    choice = page.locator('.device-choice[data-target="gone-tv"] .reach-badge')
+    assert choice.inner_text() == "Can't reach"
+    page.goto(server + "/#device=shield-a")
+    shield = page.locator('.device[data-dev="shield-a"]')
+    shield.locator(".ip-alert").wait_for(state="visible")
+    assert "192.0.2.40" in shield.locator(".ip-alert").inner_text()
+    assert shield.locator(".reach-alert").is_hidden()
+    badge = page.locator('.device-choice[data-target="shield-a"] .reach-badge')
+    assert badge.inner_text() == "Wrong IP"
+    healthy = page.locator('.device-choice[data-target="lg-a"] .reach-badge')
+    assert healthy.count() == 0
+    context.close()
+
+
+def test_favorites_row_hides_netflix_and_uses_guarded_routes(
+    server: str, browser: Browser
+) -> None:
+    context = browser.new_context(
+        viewport={"width": 375, "height": 812}, extra_http_headers=HEADERS
+    )
+    page = context.new_page()
+    page.goto(server + "/#device=shield-a")
+    card = page.locator('.device[data-dev="shield-a"]')
+    card.locator(".favorites button").first.wait_for()
+    labels = card.locator(".favorites button").all_inner_texts()
+    assert labels == ["Plex", "Sleep 30 min"]
+    assert card.locator(".favorites").is_visible()
+    other = page.locator('.device[data-dev="lg-a"] .favorites')
+    assert other.count() == 1 and other.is_hidden()
+    card.locator(".favorites button", has_text="Plex").click()
+    card.locator(".notice").wait_for(state="visible")
+    assert "Someone may be watching this TV." in card.locator(".notice").inner_text()
+    context.close()
+
+
+def test_in_use_dialog_shows_what_is_on(server: str, browser: Browser) -> None:
+    context = browser.new_context(
+        viewport={"width": 375, "height": 812}, extra_http_headers=HEADERS
+    )
+    page = context.new_page()
+    page.goto(server + "/#device=shield-a")
+    card = page.locator('.device[data-dev="shield-a"]')
+    card.locator(".foreground", has_text="Plex · Playing · The Matrix").wait_for()
+    card.locator('[data-act="home"]').click()
+    notice = card.locator(".notice")
+    notice.wait_for(state="visible")
+    assert "On now: Plex · Playing · The Matrix" in notice.inner_text()
+    page.keyboard.press("Escape")
     context.close()

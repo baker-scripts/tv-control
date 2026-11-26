@@ -20,6 +20,7 @@ from PIL import Image as PillowImage
 import adbops
 import appcache
 import apppolicy
+import haremote
 import inputs
 import messages
 import plexnow
@@ -361,6 +362,8 @@ async def do_key(device: str, key: str) -> dict[str, Any]:
     async def act(dev: dict[str, Any]) -> dict[str, Any]:
         name = adbops.normalize_key(key)
         target = dev.get("volume_via")
+        if target == haremote.VIA and name in webos.VOLUME_KEYS:
+            return await haremote.send_key(dev, name)
         if target and name in webos.VOLUME_KEYS:
             tv = await get_device(target)
             if tv["type"] != "webos":
@@ -1201,6 +1204,103 @@ async def do_quick_apps(device: str) -> dict[str, Any]:
     }
 
 
+DEFAULT_FAVORITE_APPS = (
+    ("Plex", PLEX_PKG),
+    ("YouTube", "com.google.android.youtube.tv"),
+    ("SmartTube", adbops.SMARTTUBE_PKG),
+)
+DEFAULT_FAVORITE_SLEEP_MIN = 30
+NETFLIX_RE = re.compile(r"netflix", re.IGNORECASE)
+
+
+def _favorite(
+    dev: dict[str, Any], entry: Any, denied: list[str]
+) -> tuple[dict[str, Any] | None, str | None]:
+    """(button, None) for a devices.yml favorites entry, or (None, why it is dropped). No device call."""
+    if not isinstance(entry, dict):
+        return None, "entry is not a mapping"
+    kind = entry.get("kind")
+    label = str(entry.get("label") or "")
+    if kind == "app":
+        app = str(entry.get("app") or "")
+        if not app:
+            return None, "app entry has no app id"
+        if NETFLIX_RE.search(f"{app} {label}"):
+            return None, "netflix is never offered"
+        why = apppolicy.refusal(dev, app, [label], denied)
+        if why:
+            return None, why
+        return {"kind": "app", "app": app, "label": label or app}, None
+    if kind == "input":
+        value = str(entry.get("input") or "")
+        why = inputs_refusal(dev)
+        if not value or why:
+            return None, why or "input entry has no input id"
+        return {"kind": "input", "input": value, "label": label or value}, None
+    if kind == "sleep":
+        try:
+            minutes = int(entry.get("minutes", 0))
+        except (TypeError, ValueError):
+            minutes = 0
+        if minutes not in sleeptimer.PRESETS_MIN:
+            return None, f"sleep minutes must be one of {sleeptimer.PRESETS_MIN}"
+        why = verb_refusal(dev, "sleep_timer")
+        if why:
+            return None, why
+        return {
+            "kind": "sleep",
+            "minutes": minutes,
+            "label": label or f"Sleep {minutes} min",
+        }, None
+    return None, f"unknown kind {kind!r}; one of app, input, sleep"
+
+
+def _default_favorites(
+    dev: dict[str, Any], installed: set[str]
+) -> list[dict[str, Any]]:
+    apps = [
+        {"kind": "app", "app": pkg, "label": label}
+        for label, pkg in DEFAULT_FAVORITE_APPS
+        if pkg in installed
+    ]
+    sleep = {"kind": "sleep", "minutes": DEFAULT_FAVORITE_SLEEP_MIN}
+    return [*apps, sleep]
+
+
+async def do_favorites(device: str) -> dict[str, Any]:
+    """One-tap buttons from devices.yml `favorites` (default: Plex, YouTube, SmartTube, 30 min sleep).
+
+    The buttons only name an app, input, or timer; the panel presses them through its own
+    open, input, and sleeptimer routes, so every guard on those routes still applies.
+    """
+    try:
+        dev = await get_device(device)
+    except DeviceError as exc:
+        return {"device": device, **exc.body()}
+    configured = dev.get("favorites")
+    entry = appcache.get(device, "apps")
+    installed = {a["id"] for a in (entry or {}).get("items", [])}
+    entries = (
+        _default_favorites(dev, installed)
+        if configured is None
+        else configured
+        if isinstance(configured, list)
+        else []
+    )
+    denied = await load_denied_apps()
+    buttons: list[dict[str, Any]] = []
+    skipped: list[dict[str, str]] = []
+    for item in entries:
+        button, why = _favorite(dev, item, denied)
+        if button:
+            buttons.append(button)
+        else:
+            skipped.append({"entry": str(item)[:80], "why": str(why)})
+    if configured is None:
+        skipped = []
+    return {"device": device, "favorites": buttons, "skipped": skipped}
+
+
 async def do_toast(
     device: str,
     message: str,
@@ -1636,8 +1736,20 @@ CAPABILITY_VERBS = {"find_remote": "find_remote", "power": "power"}
 SITE_VERBS = frozenset({"list_devices", "scan_site", "capabilities"})
 
 
+def haremote_route(dev: dict[str, Any]) -> tuple[str | None, str | None]:
+    bad = haremote.config_error(dev)
+    if bad:
+        return None, bad
+    return (
+        f"ha_remote:{dev['ha_remote']['entity']} (Home Assistant remote.send_command)",
+        None,
+    )
+
+
 def volume_path(dev: dict[str, Any]) -> tuple[str | None, str | None]:
     """(route, None) for the volume keys on dev, or (None, why not)."""
+    if dev.get("volume_via") == haremote.VIA:
+        return haremote_route(dev)
     if dev.get("volume_via"):
         return f"webos:{dev['volume_via']}", None
     if dev["type"] == "webos":
