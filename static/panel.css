@@ -9,3 +9,5 @@ button.pressed{transform:scale(.94);filter:brightness(1.15)}
 .device-choice .reach-badge{display:inline-block;margin-left:6px;padding:0 6px;border-radius:8px;background:var(--danger);color:var(--on);font-size:11px;font-weight:600}
 .favorites{margin:16px 0 0}.favorites button{flex:1 1 auto;background:var(--surface);border:1px solid var(--line)}
 .notice .notice-now{font-weight:400;color:var(--muted)}.notice .notice-now:empty{display:none}
+header b{white-space:nowrap}header span{min-width:0;overflow-wrap:anywhere}
+@media(max-width:700px){.device-choice strong{white-space:normal;overflow-wrap:anywhere}.device-choice span{max-width:100%}}
