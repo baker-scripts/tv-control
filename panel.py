@@ -34,6 +34,7 @@ from starlette.responses import (
 from starlette.routing import Route
 
 import messages
+import plexrestart
 import scan
 import tools
 from inventory import DeviceError, load_devices
@@ -77,6 +78,8 @@ USER_GET_VERBS = frozenset(
 # A message is not one of them: the message policy shows it over playback.
 IN_USE_CHECKED = frozenset({"home", "open"})
 RATE_LIMIT_S = 5.0
+PLEX_RESTART_GAP_S = 60.0
+_last_plex_restart: float | None = None
 POWER_KEYS = frozenset({"SLEEP", "WAKEUP", "POWER"})
 _last_power: dict[str, float] = {}
 
@@ -336,6 +339,15 @@ def _card(dev: dict[str, Any], admin: bool = True) -> str:
 </details></section>"""
 
 
+ADMIN_TOOLS = (
+    '<section id="server-tools" aria-label="Server tools"><button id="restart-plex" class="danger" type="button">Restart Plex</button>'
+    '<p class="muted">Admins only. Everyone watching Plex is disconnected for about a minute.</p></section>'
+    '<dialog id="plex-confirm" aria-labelledby="plex-confirm-title"><form method="dialog"><h2 id="plex-confirm-title">Restart Plex?</h2>'
+    "<p>Everyone watching Plex will be disconnected for about a minute.</p>"
+    '<div class="row"><button value="cancel" autofocus>Keep Plex running</button><button value="restart">Restart Plex</button></div></form></dialog>'
+)
+
+
 async def index(request: Request) -> Response:
     denied = _deny(request, post=False)
     if denied:
@@ -355,6 +367,10 @@ async def index(request: Request) -> Response:
         PAGE.replace("{{BODY}}", body)
         .replace("{{CHOICES}}", choices)
         .replace("{{USER}}", html.escape(_user(request) or ""))
+        .replace(
+            "{{ADMIN_TOOLS}}",
+            ADMIN_TOOLS if _is_admin(request) and plexrestart.enabled() else "",
+        )
     )
 
 
@@ -443,6 +459,51 @@ async def api_post(request: Request) -> Response:
     return response
 
 
+async def _restart_plex(request: Request, name: str, data: dict[str, Any]) -> Response:
+    # Checked here too, not only in _authorize: a later USER_POST_VERBS edit must not open this.
+    if not _is_admin(request):
+        return _forbidden(f"restartplex is limited to the {ADMIN_GROUP} group")
+    if name != "plex":
+        return JSONResponse({"error": f"unknown target {name}"}, 404)
+    if data.get("confirm") != "plex":
+        return JSONResponse(
+            {
+                "error": "Restart confirmation required",
+                "next_step": "Confirm the Plex restart.",
+            },
+            400,
+        )
+    if not plexrestart.enabled():
+        return JSONResponse(
+            {
+                "error": "unavailable: PLEX_RESTART_SOCKET is not set",
+                "next_step": "Ask an admin to enable the Plex restart socket.",
+            },
+            503,
+        )
+    global _last_plex_restart
+    now = time.monotonic()
+    if _last_plex_restart is not None:
+        wait = _last_plex_restart + PLEX_RESTART_GAP_S - now
+        if wait > 0:
+            return JSONResponse(
+                {
+                    "error": "Plex was just restarted",
+                    "next_step": "Wait a minute and check Plex before trying again.",
+                },
+                429,
+                headers={"Retry-After": str(int(wait) + 1)},
+            )
+    _last_plex_restart = now
+    result = await plexrestart.restart()
+    audit.info(
+        "plex-restart user=%s result=%s",
+        json.dumps(_user(request)),
+        "restarted" if result.get("restarted") else json.dumps(result.get("error")),
+    )
+    return JSONResponse(result, 200 if result.get("restarted") else 502)
+
+
 async def _api_post(request: Request, what: str, name: str) -> Response:
     denied = _deny(request, post=True) or await _authorize(
         request, what, name, post=True
@@ -450,6 +511,8 @@ async def _api_post(request: Request, what: str, name: str) -> Response:
     if denied:
         return denied
     data = await _body(request)
+    if what == "restartplex":
+        return await _restart_plex(request, name, data)
     needs_confirm = (what == "power" and data.get("state") == "off") or (
         what == "key"
         and str(data.get("key", "")).strip().upper().removeprefix("KEYCODE_") == "SLEEP"
