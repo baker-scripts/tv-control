@@ -260,7 +260,7 @@ def _card(dev: dict[str, Any], admin: bool = True) -> str:
         else ""
     )
     inputs = (
-        '<div class="input-section"><p class="muted">TV input · <span class="current-input">Checking…</span></p><div class="inputs row" aria-label="TV inputs"></div><p class="inputnote muted"></p></div>'
+        '<details class="secondary" open><summary>TV input</summary><div class="input-section"><p class="muted">TV input · <span class="current-input">Checking…</span></p><div class="inputs row" aria-label="TV inputs"></div><p class="inputnote muted"></p></div></details>'
         if "inputs" in caps or dev.get("inputs")
         else ""
     )
@@ -302,6 +302,8 @@ def _card(dev: dict[str, Any], admin: bool = True) -> str:
         '<form class="text-form row"><input id="text-{n}" class="text-entry" maxlength="200" placeholder="Search, password, URL" autocomplete="off" autocapitalize="none" spellcheck="false"><button type="submit" aria-label="Send text">Send</button></form>'
         f'<div class="chips" aria-label="Quick text">{chips}</div></div>'
     ).replace("{n}", re.sub(r"[^a-z0-9]", "-", dev["name"].lower()))
+    if typing:
+        typing = f'<details class="secondary" open><summary>Type to the TV</summary>{typing}</details>'
     note = (
         '<p class="muted">Volume needs HDMI-CEC on this TV; it may be unavailable.</p>'
         if dev.get("tv_control") == "best-effort"
@@ -314,7 +316,7 @@ def _card(dev: dict[str, Any], admin: bool = True) -> str:
     )
     msg_id = "msg-" + re.sub(r"[^a-z0-9]", "-", dev["name"].lower())
     return f"""<section class="device" data-dev="{name}" data-type="{html.escape(dev.get("type", ""))}" data-state="loading" aria-busy="true" hidden>
-<div class="device-heading"><div><h1>{name}</h1><p class="connection">Checking connection…</p><p class="paths muted"></p>{badge}</div><span class="device-type">{html.escape(dev.get("type", ""))}</span></div>
+<div class="device-heading"><div><h1>{name}</h1><p class="connection">Checking connection…</p><p class="paths muted"></p>{badge}</div><div class="device-meta"><span class="state-chip" role="status" hidden></span><span class="device-type">{html.escape(dev.get("type", ""))}</span></div></div>
 <p class="reach-alert" role="alert" hidden>Can't reach this TV</p><p class="ip-alert" role="alert" hidden></p>
 <p class="offline-note" hidden></p>
 <div class="now" aria-live="polite"><p class="now-label">On now</p><p class="foreground">Looking for the current app…</p></div>
@@ -323,8 +325,8 @@ def _card(dev: dict[str, Any], admin: bool = True) -> str:
 {preview}{banner}
 <p class="timer-status">Sleep timer · <span class="countdown" role="timer">Off</span></p>
 <div class="row power"><button data-act="home">Home</button><button data-act="power-on">On</button><button data-act="power-off" class="danger">Power off</button>{find}</div>
-<form class="message-form"><label for="{msg_id}">Send a message to the TV</label><div class="row"><input id="{msg_id}" class="toast" maxlength="200" placeholder="Short message" autocomplete="off"><button type="submit">Send message</button></div></form>
-<details class="history"><summary>Recent messages</summary><ol class="history-list"></ol></details>
+<details class="secondary" open><summary>Send a message</summary><form class="message-form"><label for="{msg_id}">Send a message to the TV</label><div class="row"><input id="{msg_id}" class="toast" maxlength="200" placeholder="Short message" autocomplete="off"><button type="submit">Send message</button></div></form>
+<details class="history"><summary>Recent messages</summary><ol class="history-list"></ol></details></details>
 {inputs}<p class="quick-label muted">Open an app</p><div class="quick" aria-label="Open an app"><p class="muted">Loading installed apps…</p></div>
 <div class="remote" aria-label="Remote control"><div class="dpad">{dpad}</div><div class="controls">{controls}</div>{typing}{note}</div>
 <details class="tools"><summary>Apps &amp; tools</summary>

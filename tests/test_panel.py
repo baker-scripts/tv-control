@@ -779,3 +779,55 @@ assert.equal(nowText({awake:true,app_title:'Projectivy',state:'none'}),'Projecti
 """
     )
     subprocess.run(["node", "-e", code], check=True, capture_output=True)
+
+
+def test_card_has_state_chip_and_collapsible_secondary_rows() -> None:
+    card = panel._card({"name": "shield", "type": "shield", "inputs": ["x"]})
+    assert (
+        'class="state-chip"' in card and "hidden" in card.split("state-chip", 1)[1][:30]
+    )
+    assert card.count('<details class="secondary" open>') == 3
+    for title in ("Send a message", "Type to the TV", "TV input"):
+        assert f"<summary>{title}</summary>" in card
+    css = (panel.STATIC / "panel.css").read_text()
+    phone = css.split("@media(max-width:700px){main{padding:16px", 1)[1]
+    assert "min-height:56px" in phone
+    assert "details.secondary" in panel.JS and "max-width:700px" in panel.JS
+
+
+def test_chip_text_runs_javascript() -> None:
+    import subprocess
+
+    function = panel.JS.split("const PLAIN=", 1)[1].split("\n", 1)[0]
+    code = (
+        "const assert=require('node:assert/strict'); const PLAIN="
+        + function
+        + """
+assert.equal(chipText({playback:'playing'},true),'Playing');
+assert.equal(chipText({playback:'buffering'},true),'Buffering');
+assert.equal(chipText({playback:'paused'},true),'Paused');
+assert.equal(chipText({playback:'idle'},true),'Idle');
+assert.equal(chipText({playback:'playing'},false),'');
+assert.equal(chipText({playback:null},true),'');
+assert.equal(chipText({},true),'');
+"""
+    )
+    subprocess.run(["node", "-e", code], check=True, capture_output=True)
+
+
+def test_event_stream_carries_playback_from_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        panel.tools,
+        "do_status",
+        AsyncMock(return_value={"adb_state": "device", "playback": "paused"}),
+    )
+
+    async def first() -> str:
+        stream = panel._status_stream(["tv"], interval=0)
+        chunk = await anext(stream)
+        await stream.aclose()
+        return chunk
+
+    assert '"playback": "paused"' in asyncio.run(first())
