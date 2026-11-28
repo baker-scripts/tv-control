@@ -501,7 +501,8 @@ async def _restart_plex(request: Request, name: str, data: dict[str, Any]) -> Re
         json.dumps(_user(request)),
         "restarted" if result.get("restarted") else json.dumps(result.get("error")),
     )
-    return JSONResponse(result, 200 if result.get("restarted") else 502)
+    status = 200 if result.get("restarted") else 409 if result.get("busy") else 502
+    return JSONResponse(result, status)
 
 
 async def _api_post(request: Request, what: str, name: str) -> Response:
