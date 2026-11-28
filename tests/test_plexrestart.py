@@ -116,6 +116,21 @@ def test_admin_restart_logs_the_user_and_rate_limits(
     )
 
 
+def test_busy_reply_maps_to_409_with_next_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "r.sock")
+        thread = serve(path, b"busy\n")
+        out = asyncio.run(plexrestart.restart(path))
+        thread.join(2)
+    assert out["busy"] is True and out["next_step"]
+    monkeypatch.setattr(panel.plexrestart, "restart", AsyncMock(return_value=out))
+    resp = call("restartplex", {"confirm": "plex"}, name="plex")
+    assert resp.status_code == 409
+    assert json.loads(resp.body)["next_step"]
+
+
 def test_unconfigured_socket_answers_503_without_a_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

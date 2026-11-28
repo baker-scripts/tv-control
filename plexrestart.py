@@ -1,7 +1,7 @@
 """Ask the host to restart Plex through one unix socket.
 
 The host side is a systemd socket unit that runs a single sudoers-allowed command and answers
-`restarted` or `failed`. This process holds no container-runtime access.
+`restarted`, `busy` (Plex maintenance running), or `failed`. This process holds no container-runtime access.
 """
 
 import asyncio
@@ -34,4 +34,10 @@ async def restart(path: str | None = None) -> dict[str, Any]:
         writer.close()
     if reply.strip() == b"restarted":
         return {"restarted": True}
+    if reply.strip() == b"busy":
+        return {
+            "busy": True,
+            "error": "busy: Plex maintenance is running",
+            "next_step": "Wait for the Plex maintenance job to finish, then try again.",
+        }
     return {"error": "failed: the host could not restart Plex"}
