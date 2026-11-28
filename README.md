@@ -26,7 +26,7 @@ The panel is meant to sit behind a reverse proxy with forward auth (built and te
 - Every panel route except `/healthz` needs the header `X-TV-Proxy-Key` equal to `TV_PROXY_KEY`. Only the reverse proxy sets it, so a client that reaches the port directly cannot forge the user headers. Without `TV_PROXY_KEY` the panel answers 503.
 - The user comes from `X-authentik-username`, and groups from `X-authentik-groups`.
 - Group `tv-admin` sees and drives every device. Group `tv-site-<site>` sees only that site's devices and can use key, launch, sleep timer, power, wake, input, and toast.
-- Reboot, pair (webOS pairing and Shield fast-key pairing), baseline, lockdown, scan, approve, screenshot, and screen preview are admin-only. A denial returns 403 with `error`, `cause`, and `next_step`.
+- Reboot, pair (webOS pairing and Shield fast-key pairing), baseline, lockdown, scan, approve, screenshot, screen preview, and Restart Plex are admin-only. Restart Plex needs the typed confirmation `plex`, runs at most once a minute, and writes an audit line naming the user. It sends no command itself: it connects to the unix socket in `PLEX_RESTART_SOCKET`, which a host systemd unit answers by running one sudoers-allowed command. The container mounts no container-runtime socket. A denial returns 403 with `error`, `cause`, and `next_step`.
 - POST routes need `X-TV-Panel: 1`, which a cross-site form cannot send. Real baseline and lockdown runs need the device name typed as confirmation; MCP can only dry-run them.
 - Power and input changes: at most one per 5 s per device (429). Every POST writes one audit line to stdout.
 - Responses carry a strict CSP (`script-src 'self'`, no inline script or style, `frame-ancestors 'none'`) and `X-Frame-Options: DENY`.
@@ -40,6 +40,7 @@ The panel is meant to sit behind a reverse proxy with forward auth (built and te
 | `TV_PROXY_KEY` | (unset) | Shared secret the reverse proxy sends as `X-TV-Proxy-Key`. Required for the panel. |
 | `TV_CONTROL_MCP_TOKEN` | (unset) | Bearer token for `/mcp`. Required for MCP. |
 | `TV_PANEL_URL` | `the panel URL` | Public panel URL, shown in error messages. |
+| `PLEX_RESTART_SOCKET` | (unset) | Unix socket of the host unit that restarts Plex. Unset hides the admin Restart Plex button. |
 | `TS_IP` | (unset) | Extra bind address (for example a Tailscale IP) next to 127.0.0.1. Bound with `IP_FREEBIND`, so it may come up later. |
 | `PANEL_PORT` | `8011` | Panel and `/healthz`. |
 | `MCP_PORT` | `8012` | MCP streamable HTTP at `/mcp`. |
