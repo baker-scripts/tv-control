@@ -6,7 +6,7 @@ A web panel and MCP server for a small fleet of TVs: NVIDIA Shields and Fire TVs
 
 - Remote control per device: D-pad, media, volume, and home keys; app launch with quick-launch buttons; on-screen toasts.
 - Fast keys on Shields: after a one-time pairing, keys go over the Android TV Remote v2 protocol ([androidtvremote2](https://github.com/tronikos/androidtvremote2)) in milliseconds instead of about 1 s per `adb shell input`. Unpaired Shields and any Remote v2 failure fall back to ADB.
-- Live status over Server-Sent Events (`/events`, one update per device every 10 s), so cards refresh without polling.
+- Live status over Server-Sent Events (`/events`, one update per device every 10 s), so cards refresh without polling, including a playing, buffering, paused, or idle chip on each Android card. On a phone the message, typing, and input rows start collapsed.
 - Installable PWA: web manifest and icons, content-hashed static assets served `immutable`.
 - Power, wake (WoL through an SSH relay on the TV's LAN), input switching, and sleep timers. Inputs are read from the TV itself and named the way people say them (see "Inputs"). LG webOS inputs switch through aiowebostv; Fire TV inputs switch through a passthrough intent or a configured keyevent (does not wake the TV).
 - `capabilities` reports what a device can do now, and `tv_action` is one write verb for open app, switch input, play title, wake, sleep, and volume, with a `shadow` dry run (see "One write verb and capabilities").

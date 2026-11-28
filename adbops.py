@@ -228,6 +228,12 @@ async def status(dev: dict[str, Any]) -> dict[str, Any]:
     match = re.search(r"versionName=(\S+)", pkg)
     body["smarttube_version"] = match.group(1) if match else None
     body["ip_alert"] = await ip_alert(dev, serial)
+    try:
+        body["playback"] = playback_state(
+            parse_sessions(await read(serial, SESSIONS_READ))
+        )
+    except DeviceError:
+        body["playback"] = None
     return body
 
 
@@ -464,6 +470,16 @@ def session_for(
     if own:
         return own[0]
     return next((s for s in sessions if s["state"] in ACTIVE_STATES), None)
+
+
+def playback_state(sessions: list[dict[str, Any]]) -> str:
+    """Panel chip: playing, buffering, paused, or idle across all media sessions."""
+    names = {s.get("state") for s in sessions}
+    if names & (ACTIVE_STATES - {"buffering", "connecting"}):
+        return "playing"
+    if names & {"buffering", "connecting"}:
+        return "buffering"
+    return "paused" if "paused" in names else "idle"
 
 
 async def what_is_on(dev: dict[str, Any]) -> dict[str, Any]:

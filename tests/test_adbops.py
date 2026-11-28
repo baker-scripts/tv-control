@@ -182,7 +182,7 @@ def test_unpaired_shield_health_reads_native_state(
     health = go(adbops.health(SHIELD))
     assert health["awake"] is True and health["playing"] is True
     shell_calls = [c for c in fake.calls if " shell " in c]
-    assert len(shell_calls) == 2 + len(adbops.HEALTH_READS) + 2
+    assert len(shell_calls) == 2 + len(adbops.HEALTH_READS) + 3
     assert all(
         " shell dumpsys " in c or " shell settings get " in c for c in shell_calls
     )
@@ -495,3 +495,50 @@ def test_pool_not_filled_for_offline(monkeypatch: pytest.MonkeyPatch) -> None:
     install(monkeypatch, {"get-state": (1, b"", "device offline")})
     assert go(adbops.adb_ready(SHIELD))[1] == "offline"
     assert adbops._ready == {}
+
+
+@pytest.mark.parametrize(
+    "states,chip",
+    [
+        ([], "idle"),
+        (["stopped"], "idle"),
+        (["none", "paused"], "paused"),
+        (["paused", "buffering"], "buffering"),
+        (["connecting"], "buffering"),
+        (["paused", "playing"], "playing"),
+        (["buffering", "playing"], "playing"),
+        (["fast_forwarding"], "playing"),
+        (["error"], "idle"),
+        ([None], "idle"),
+    ],
+)
+def test_playback_state_chip(states: list[str | None], chip: str) -> None:
+    assert adbops.playback_state([{"state": s} for s in states]) == chip
+
+
+def test_status_reports_playback_chip(monkeypatch: pytest.MonkeyPatch) -> None:
+    sessions = (
+        "      package=com.plexapp.android\n"
+        "      active=true\n"
+        "      state=PlaybackState {state=6, position=0}\n"
+    )
+    install(
+        monkeypatch,
+        {
+            "get-state": ok("device"),
+            "mCurrentFocus": ok("mCurrentFocus=Window{x u0 pkg/act}\n"),
+            "dumpsys media_session": ok(sessions),
+        },
+    )
+    assert go(adbops.status(SHIELD))["playback"] == "buffering"
+
+
+def test_status_playback_read_failure_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    install(
+        monkeypatch,
+        {
+            "get-state": ok("device"),
+            "dumpsys media_session": (1, b"", "closed"),
+        },
+    )
+    assert go(adbops.status(SHIELD))["playback"] is None
